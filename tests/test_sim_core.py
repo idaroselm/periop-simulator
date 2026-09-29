@@ -1,0 +1,197 @@
+"""Validation tests for sim_core.py (both engines).  Run from the project folder:  pytest -q
+
+What is checked
+ 1. Hand-calculated answers: with no randomness (sd = 0) the results must equal what you can work out on paper.
+ 2. The Excel workbook: fed the exact random draws from 50 Excel days (tests/excel_days.json),
+    each engine must reproduce Excel's peak census, last OR / PACU times and the full 15-minute grids.
+ 3. An independent brute-force model (minute-by-minute census) on 200 random days.
+ 4. Queueing theory: mid-day average census must match Little's Law (L = arrival rate x time in stage).
+ 5. The two engines agree statistically, and every result is internally consistent.
+"""
+import json
+import math
+import pathlib
+import sys
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+import sim_core  # noqa: E402
+
+ENGINES = ["python", "numpy"]
+EXCEL_DAYS = json.loads((pathlib.Path(__file__).parent / "excel_days.json").read_text())
+
+
+# ---------------------------------------------------------------- helpers: feed fixed draws into an engine
+def run_with_draws(engine, monkeypatch, pre, ort, pac, cases, n_or=11, cushion=0, **extra):
+    """Run one simulated day where the 'random' times are the given lists (patient order: OR 1 cases 1..n, OR 2, ...)."""
+    params = dict(reps=1, cases=cases, n_or=n_or, buf_min=cushion, buf_max=cushion, wave_gap=30, **extra)
+    if engine == "python":
+        seq = iter([v for trio in zip(pre, ort, pac) for v in trio])
+
+        class FakeRandom:                       # stands in for random.Random
+            def __init__(self, seed): pass
+            def gauss(self, m, s): return next(seq)
+            def randint(self, a, b): return a
+
+        monkeypatch.setattr(sim_core.random, "Random", FakeRandom)
+    else:
+        arrays = iter([np.array(x, float).reshape(1, n_or, cases) for x in (pre, ort, pac)])
+
+        class FakeGenerator:                    # stands in for numpy.random.default_rng(seed)
+            def normal(self, m, s, shape): return next(arrays)
+            def integers(self, lo, hi, shape): return np.full(shape, lo)
+
+        monkeypatch.setattr(np.random, "default_rng", lambda seed: FakeGenerator())
+    return sim_core.simulate(params, engine=engine)
+
+
+def reference_day(pre, ort, pac, cases, n_or=11, first=450, turnover=30, cushion=0):
+    """Independent brute-force model: build every patient's times, then count census minute by minute."""
+    h_in, h_out, p_in, p_out = [], [], [], []
+    for o in range(n_or):
+        t = first
+        for c in range(cases):
+            i = o * cases + c
+            or_in = t
+            or_out = or_in + ort[i]
+            h_in.append(or_in - pre[i] - cushion); h_out.append(or_in)
+            p_in.append(or_out); p_out.append(or_out + pac[i])
+            t = or_out + turnover
+    minutes = np.arange(0, 3 * 1440)
+    census = lambda a, b: ((np.array(a)[:, None] <= minutes) & (np.array(b)[:, None] > minutes)).sum(axis=0)
+    starts = sim_core.T0 + sim_core.BIN * np.arange(sim_core.NB)
+    grid = lambda a, b: [int(sum(1 for x, y in zip(a, b) if x <= s + sim_core.BIN - 1 / 60 and y > s)) for s in starts]
+    ch, cp = census(h_in, h_out), census(p_in, p_out)
+    return dict(peak_hold=int(ch.max()), peak_pacu=int(cp.max()), last_or=max(p_in), last_pacu=max(p_out),
+                grid_hold=grid(h_in, h_out), grid_pacu=grid(p_in, p_out), census_hold=ch, census_pacu=cp)
+
+
+def random_draws(rng, n):
+    f = lambda m, s: np.abs(np.floor(rng.normal(m, s, n))).tolist()     # ABS(INT(NORM.INV(RAND(), m, s)))
+    return f(60, 30), f(60, 20), f(90, 40)
+
+
+# ---------------------------------------------------------------- 1. hand-calculated answers (no randomness)
+NO_VARIATION = dict(pre_s=0, or_s=0, pacu_s=0, reps=200)
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_no_variation_88_cases(engine):
+    r = sim_core.simulate(dict(NO_VARIATION, cases=8), engine=engine)
+    # 11 first-case patients sit in pre-op 6:30-7:30; every later patient replaces one exactly -> 11 at once
+    assert (r["need_hold"], r["need_pacu"]) == (11, 11)
+    assert r["last_or_mean"] == 7.5 * 60 + 7 * 90 + 60          # 7:30 + 7 x (60 + 30) + 60 = 7:00 PM
+    assert r["last_pacu_p95"] == r["last_or_mean"] + 90          # 8:30 PM
+    assert r["obs_fit"] == 23 - 11
+    assert (r["over_hold"], r["over_pacu"]) == (1.0, 0.0)        # 11 > 9 free beds; 11 <= 12 PACU beds
+    assert r["hold_empty_after"] == 18 * 60                      # last patient leaves pre-op at 6:00 PM
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_no_variation_44_cases(engine):
+    r = sim_core.simulate(dict(NO_VARIATION, cases=4), engine=engine)
+    assert (r["need_hold"], r["need_pacu"]) == (11, 11)
+    assert r["last_or_mean"] == 7.5 * 60 + 3 * 90 + 60           # 1:00 PM
+    assert r["hold_empty_after"] == 12 * 60                      # noon
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_no_variation_early_arrival(engine):
+    # arriving 45 min early makes each pre-op stay 105 min, so consecutive patients of an OR overlap for 15 min
+    r = sim_core.simulate(dict(NO_VARIATION, cases=8, buf_min=45, buf_max=45), engine=engine)
+    assert r["need_hold"] == 22
+    assert r["need_pacu"] == 11                                  # PACU is unaffected
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_no_variation_staggered_waves(engine):
+    # waves split 11 ORs 4 / 4 / 3; the last wave starts 90 min later, so the day ends 90 min later
+    r = sim_core.simulate(dict(NO_VARIATION, cases=8, waves=3, wave_gap=45), engine=engine)
+    assert sim_core.wave_starts(dict(sim_core.DEFAULTS, waves=3, wave_gap=45)) == [450] * 4 + [495] * 4 + [540] * 3
+    assert r["last_or_mean"] == 19 * 60 + 90
+
+
+# ---------------------------------------------------------------- 2. the Excel workbook, draw for draw
+@pytest.mark.parametrize("engine", ENGINES)
+@pytest.mark.parametrize("day", range(len(EXCEL_DAYS)))
+def test_matches_excel(engine, day, monkeypatch):
+    x = EXCEL_DAYS[day]
+    r = run_with_draws(engine, monkeypatch, x["pre"], x["or"], x["pacu"], x["cases"])
+    assert r["need_hold"] == x["peak_hold"]
+    assert r["need_pacu"] == x["peak_pacu"]
+    assert r["last_or_mean"] == pytest.approx(x["last_or"], abs=1e-6)
+    assert r["last_pacu_p95"] == pytest.approx(x["last_pacu"], abs=1e-6)
+    assert [int(v) for v in r["p95_hold"]] == x["grid_hold"]
+    assert [int(v) for v in r["p95_pacu"]] == x["grid_pacu"]
+
+
+# ---------------------------------------------------------------- 3. an independent brute-force model
+@pytest.mark.parametrize("engine", ENGINES)
+def test_matches_brute_force_model(engine, monkeypatch):
+    rng = np.random.default_rng(2026)
+    for _ in range(100):
+        cases = int(rng.integers(1, 9))
+        cushion = int(rng.integers(0, 46))
+        pre, ort, pac = random_draws(rng, 11 * cases)
+        ref = reference_day(pre, ort, pac, cases, cushion=cushion)
+        r = run_with_draws(engine, monkeypatch, pre, ort, pac, cases, cushion=cushion)
+        assert (r["need_hold"], r["need_pacu"]) == (ref["peak_hold"], ref["peak_pacu"])
+        assert r["last_or_mean"] == ref["last_or"] and r["last_pacu_p95"] == ref["last_pacu"]
+        assert [int(v) for v in r["p95_hold"]] == ref["grid_hold"]
+        assert [int(v) for v in r["p95_pacu"]] == ref["grid_pacu"]
+
+
+# ---------------------------------------------------------------- 4. Little's Law
+def test_littles_law_midday():
+    """Mid-day (11 AM-5 PM) each OR sends one patient per OR case + turnover (about 90 min).
+    L = arrivals per minute x average minutes in the stage."""
+    rng = np.random.default_rng(7)
+    ch, cp, e_pre, e_pac, e_cycle = [], [], [], [], []
+    for _ in range(1500):
+        pre, ort, pac = random_draws(rng, 88)
+        ref = reference_day(pre, ort, pac, 8)
+        ch.append(ref["census_hold"][660:1020].mean()); cp.append(ref["census_pacu"][660:1020].mean())
+        e_pre += pre; e_pac += pac; e_cycle += [o + 30 for o in ort]
+    rate = 11 / np.mean(e_cycle)                                  # patients per minute into each stage
+    assert np.mean(cp) == pytest.approx(rate * np.mean(e_pac), abs=0.25)   # about 11 in PACU
+    assert np.mean(ch) == pytest.approx(rate * np.mean(e_pre), abs=0.25)   # about 7.3 in pre-op
+
+
+# ---------------------------------------------------------------- 5. engines agree; results are consistent
+def test_engines_agree_statistically():
+    for params in (dict(cases=8), dict(cases=4), dict(cases=8, waves=3, wave_gap=45), dict(cases=8, buf_min=10, buf_max=45)):
+        a = sim_core.simulate(dict(params, reps=4000, seed=11), engine="python")
+        b = sim_core.simulate(dict(params, reps=4000, seed=12), engine="numpy")
+        assert a["mean_hold"] == pytest.approx(b["mean_hold"], abs=0.15)
+        assert a["mean_pacu"] == pytest.approx(b["mean_pacu"], abs=0.15)
+        assert abs(a["need_hold"] - b["need_hold"]) <= 1 and abs(a["need_pacu"] - b["need_pacu"]) <= 1
+        assert a["last_or_mean"] == pytest.approx(b["last_or_mean"], abs=5)
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_internal_consistency(engine):
+    rng = np.random.default_rng(99)
+    for _ in range(25):
+        p = dict(cases=int(rng.integers(1, 9)), n_or=int(rng.integers(1, 12)), waves=int(rng.integers(1, 4)),
+                 wave_gap=int(rng.choice([0, 15, 30, 45, 60])), buf_min=0, buf_max=int(rng.integers(0, 46)),
+                 hold_beds=int(rng.integers(10, 30)), obs=int(rng.integers(0, 15)), pacu_beds=int(rng.integers(6, 20)),
+                 reps=150, seed=int(rng.integers(0, 10**6)))
+        r = sim_core.simulate(p, engine=engine)
+        assert r["avail"] == max(0, p["hold_beds"] - p["obs"])
+        assert r["obs_fit"] == max(0, p["hold_beds"] - r["need_hold"])
+        assert r["need_hold"] <= r["max_hold"] and r["need_pacu"] <= r["max_pacu"]
+        assert r["over_pacu"] == pytest.approx(r["curve_pacu"][min(p["pacu_beds"], 30)])
+        assert r["over_hold"] == pytest.approx(r["curve_hold"][min(r["avail"], 30)])
+        for c in (r["curve_hold"], r["curve_pacu"]):
+            assert all(x >= y for x, y in zip(c, c[1:])), "more beds can never mean more days over"
+        assert r["last_pacu_p95"] >= r["last_or_p95"] - 1e-9
+        assert json.loads(sim_core.run_json(json.dumps(p)))["need_hold"] >= 0      # browser entry point works
+
+
+def test_percentile_matches_excel():
+    # Excel: PERCENTILE({1,2,3,4}, 0.95) = 3.85 and PERCENTILE({5,1,9}, 0.5) = 5
+    assert sim_core.percentile([1, 2, 3, 4], 0.95) == pytest.approx(3.85)
+    assert sim_core.percentile([5, 1, 9], 0.5) == 5
+    assert float(np.percentile([1, 2, 3, 4], 95)) == pytest.approx(3.85)
