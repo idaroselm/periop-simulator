@@ -4,10 +4,12 @@ MGT 6473 Healthcare Operations Management · Final project
 
 A discrete event simulation of patient flow through **Holding Room (pre-op) → 11 ORs → PACU**.
 Set the schedule, service times and bed counts, press **Run simulation**, and the app simulates
-1,000 days to show how many pre-op and PACU beds are needed (enough on 95% of days),
+100 days (the same as the Excel workbook's log; adjustable up to 2,000) to show how many pre-op and PACU beds are needed (enough on 95% of days),
 how many 23-hr Obs patients the Holding Room can still hold, and how long the OR day runs.
 
-## Run it
+**Live app:** https://periop-simulator-auf2ujawu9nvnr95rzxohm.streamlit.app/
+
+## Run it locally
 
 ```bash
 pip install -r requirements.txt

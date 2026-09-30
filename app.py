@@ -55,7 +55,7 @@ with st.sidebar.form("inputs"):
         buf_min = st.number_input("Cushion min", 0, 120, d["buf_min"], key=f"bmin_{preset}")
         buf_max = st.number_input("Cushion max", 0, 120, d["buf_max"], key=f"bmax_{preset}")
     with st.expander("Simulation"):
-        reps = st.select_slider("Simulated days", [100, 500, 1000, 2000], value=1000)
+        reps = st.select_slider("Simulated days", [100, 500, 1000, 2000], value=100)
         seed = st.number_input("Random seed", value=6473, step=1)
     submitted = st.form_submit_button("Run simulation", type="primary", width="stretch")
 

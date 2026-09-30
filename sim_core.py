@@ -16,7 +16,7 @@ T0, NB, BIN = 240, 96, 15          # grid: 96 x 15-min intervals starting 4:00 A
 
 DEFAULTS = dict(n_or=11, cases=8, first=450, waves=1, wave_gap=30, turnover=30,
                 pre_m=60, pre_s=30, or_m=60, or_s=20, pacu_m=90, pacu_s=40,
-                hold_beds=23, obs=14, pacu_beds=12, buf_min=0, buf_max=0, reps=1000, seed=6473)
+                hold_beds=23, obs=14, pacu_beds=12, buf_min=0, buf_max=0, reps=100, seed=6473)
 
 
 def draw(rng, m, s):
