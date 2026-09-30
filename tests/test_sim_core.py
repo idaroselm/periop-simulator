@@ -195,3 +195,23 @@ def test_percentile_matches_excel():
     assert sim_core.percentile([1, 2, 3, 4], 0.95) == pytest.approx(3.85)
     assert sim_core.percentile([5, 1, 9], 0.5) == 5
     assert float(np.percentile([1, 2, 3, 4], 95)) == pytest.approx(3.85)
+
+
+# ---------------------------------------------------------------- 6. service level and typical-day lines
+@pytest.mark.parametrize("engine", ENGINES)
+def test_service_level_is_monotone(engine):
+    """A stricter planning standard can never need fewer beds."""
+    r90, r95, r99 = (sim_core.simulate(dict(reps=500, service_level=s), engine=engine) for s in (0.90, 0.95, 0.99))
+    assert r90["need_hold"] <= r95["need_hold"] <= r99["need_hold"]
+    assert r90["need_pacu"] <= r95["need_pacu"] <= r99["need_pacu"]
+    # "beds needed" is the first bed count whose share of days over is within the standard
+    for r, s in ((r90, 0.90), (r95, 0.95), (r99, 0.99)):
+        assert r["curve_pacu"][r["need_pacu"]] <= 1 - s + 1e-9
+        assert r["curve_pacu"][r["need_pacu"] - 1] > 1 - s - 0.01
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_typical_day_never_above_busy_day(engine):
+    r = sim_core.simulate(dict(reps=300), engine=engine)
+    for stage in ("hold", "pacu"):
+        assert all(t <= b + 1e-9 for t, b in zip(r[f"p50_{stage}"], r[f"p95_{stage}"]))

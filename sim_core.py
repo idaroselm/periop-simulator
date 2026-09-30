@@ -16,7 +16,8 @@ T0, NB, BIN = 240, 96, 15          # grid: 96 x 15-min intervals starting 4:00 A
 
 DEFAULTS = dict(n_or=11, cases=8, first=450, waves=1, wave_gap=30, turnover=30,
                 pre_m=60, pre_s=30, or_m=60, or_s=20, pacu_m=90, pacu_s=40,
-                hold_beds=23, obs=14, pacu_beds=12, buf_min=0, buf_max=0, reps=100, seed=6473)
+                hold_beds=23, obs=14, pacu_beds=12, buf_min=0, buf_max=0, reps=100, seed=6473,
+                service_level=0.95)   # beds are sized to be enough on this share of simulated days
 
 
 def draw(rng, m, s):
@@ -41,6 +42,11 @@ def add_to_grid(counts, t_in, t_out):
     hi = min(NB - 1, math.ceil((t_out - T0) / BIN) - 1)
     for i in range(lo, hi + 1):
         counts[i] += 1
+
+
+def ceil_beds(x):
+    """Round a percentile up to whole beds, ignoring floating-point dust (17.0000000001 stays 17)."""
+    return int(math.ceil(x - 1e-9))
 
 
 def percentile(vals, q):
@@ -90,10 +96,13 @@ def simulate_py(p):
         grid_p.append(gp)
 
     avail = max(0, p["hold_beds"] - p["obs"])
-    need_h = math.ceil(percentile(peaks_h, 0.95))
-    need_p = math.ceil(percentile(peaks_p, 0.95))
-    p95_h = [percentile([g[i] for g in grid_h], 0.95) for i in range(NB)]
-    p95_p = [percentile([g[i] for g in grid_p], 0.95) for i in range(NB)]
+    sl = p["service_level"]
+    need_h = ceil_beds(percentile(peaks_h, sl))
+    need_p = ceil_beds(percentile(peaks_p, sl))
+    p95_h = [percentile([g[i] for g in grid_h], sl) for i in range(NB)]       # busy day (service-level percentile)
+    p95_p = [percentile([g[i] for g in grid_p], sl) for i in range(NB)]
+    p50_h = [percentile([g[i] for g in grid_h], 0.5) for i in range(NB)]      # typical day (median)
+    p50_p = [percentile([g[i] for g in grid_p], 0.5) for i in range(NB)]
     busy = [i for i, v in enumerate(p95_h) if v > 0]
     n = len(peaks_h)
     return {
@@ -110,11 +119,14 @@ def simulate_py(p):
         "over_pacu": sum(v > p["pacu_beds"] for v in peaks_p) / n,
         "obs_fit": max(0, p["hold_beds"] - need_h),
         "last_or_mean": sum(last_or) / n,
-        "last_or_p95": percentile(last_or, 0.95),
-        "last_pacu_p95": percentile(last_pacu, 0.95),
+        "last_or_p95": percentile(last_or, sl),
+        "last_pacu_p95": percentile(last_pacu, sl),
         "hold_empty_after": T0 + (busy[-1] + 1) * BIN if busy else None,
         "p95_hold": p95_h,
         "p95_pacu": p95_p,
+        "p50_hold": p50_h,
+        "p50_pacu": p50_p,
+        "service_level": sl,
         # share of days each stage would run over with N beds, N = 0..30
         "curve_hold": [sum(v > b for v in peaks_h) / n for b in range(31)],
         "curve_pacu": [sum(v > b for v in peaks_p) / n for b in range(31)],
@@ -156,12 +168,15 @@ def simulate_np(p):
         return ((a[:, :, None] <= e0) & (b[:, :, None] > s0)).sum(axis=1)
 
     pk_h, pk_p = peaks(h_in, h_out), peaks(p_in, p_out)
-    p95_h = np.percentile(grid(h_in, h_out), 95, axis=0)       # linear = Excel PERCENTILE
-    p95_p = np.percentile(grid(p_in, p_out), 95, axis=0)
+    sl = p["service_level"]
+    g_h, g_p = grid(h_in, h_out), grid(p_in, p_out)
+    p95_h = np.percentile(g_h, 100 * sl, axis=0)       # busy day at the service level; linear = Excel PERCENTILE
+    p95_p = np.percentile(g_p, 100 * sl, axis=0)
+    p50_h, p50_p = np.percentile(g_h, 50, axis=0), np.percentile(g_p, 50, axis=0)   # typical day
     last_or, last_pacu = p_in.max(axis=1), p_out.max(axis=1)
     avail = max(0, p["hold_beds"] - p["obs"])
-    need_h = int(math.ceil(np.percentile(pk_h, 95)))
-    need_p = int(math.ceil(np.percentile(pk_p, 95)))
+    need_h = ceil_beds(np.percentile(pk_h, 100 * sl))
+    need_p = ceil_beds(np.percentile(pk_p, 100 * sl))
     busy = np.nonzero(p95_h > 0)[0]
     beds = np.arange(31)
     return {
@@ -171,10 +186,11 @@ def simulate_np(p):
         "max_hold": int(pk_h.max()), "max_pacu": int(pk_p.max()),
         "over_hold": float((pk_h > avail).mean()), "over_pacu": float((pk_p > p["pacu_beds"]).mean()),
         "obs_fit": max(0, p["hold_beds"] - need_h),
-        "last_or_mean": float(last_or.mean()), "last_or_p95": float(np.percentile(last_or, 95)),
-        "last_pacu_p95": float(np.percentile(last_pacu, 95)),
+        "last_or_mean": float(last_or.mean()), "last_or_p95": float(np.percentile(last_or, 100 * sl)),
+        "last_pacu_p95": float(np.percentile(last_pacu, 100 * sl)),
         "hold_empty_after": int(T0 + (busy[-1] + 1) * BIN) if busy.size else None,
         "p95_hold": p95_h.tolist(), "p95_pacu": p95_p.tolist(),
+        "p50_hold": p50_h.tolist(), "p50_pacu": p50_p.tolist(), "service_level": sl,
         "curve_hold": (pk_h[:, None] > beds).mean(axis=0).tolist(),
         "curve_pacu": (pk_p[:, None] > beds).mean(axis=0).tolist(),
         "elapsed_s": time.perf_counter() - t_start,
