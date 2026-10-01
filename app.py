@@ -5,7 +5,17 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+import importlib
+import os
+
 import sim_core
+
+# Streamlit re-runs app.py when it changes, but keeps an already-imported sim_core.py in memory. After a git push
+# that changes both files, the app would call the new code against the old model. Reload the model whenever its file changes.
+_model_mtime = os.path.getmtime(sim_core.__file__)
+if getattr(sim_core, "_loaded_mtime", None) != _model_mtime:
+    sim_core = importlib.reload(sim_core)
+    sim_core._loaded_mtime = _model_mtime
 
 st.set_page_config(page_title="Periop Patient Flow and Capacity Planning Simulator", layout="wide")
 first_visit = "seen" not in st.session_state   # open the how-to on a visitor's first load
@@ -126,15 +136,16 @@ params = read_inputs()
 
 
 @st.cache_data(show_spinner="Simulating…", max_entries=64)
-def run(p_items):
+def run(p_items, model_version):
+    """model_version (the model file's timestamp) keeps results cached from an older model from being reused."""
     return sim_core.simulate(dict(p_items))
 
 
 # Results only change when "Run simulation" is pressed; the first visit shows the case baseline.
 if "result" not in st.session_state:
-    st.session_state.result, st.session_state.result_label = run(tuple(sorted(BASELINE.items()))), "Case baseline · 88/day"
+    st.session_state.result, st.session_state.result_label = run(tuple(sorted(BASELINE.items())), _model_mtime), "Case baseline · 88/day"
 if st.session_state.pop("run_now", False):
-    st.session_state.result = run(tuple(sorted(params.items())))
+    st.session_state.result = run(tuple(sorted(params.items())), _model_mtime)
     st.session_state.result_label = "Custom scenario" if st.session_state.preset == CUSTOM else st.session_state.preset
 r = st.session_state.result
 rp = r["params"]                     # the inputs the shown results were run with
