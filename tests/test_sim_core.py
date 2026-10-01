@@ -123,8 +123,9 @@ def test_matches_excel(engine, day, monkeypatch):
     assert r["need_pacu"] == x["peak_pacu"]
     assert r["last_or_mean"] == pytest.approx(x["last_or"], abs=1e-6)
     assert r["last_pacu_p95"] == pytest.approx(x["last_pacu"], abs=1e-6)
-    assert [int(v) for v in r["p95_hold"]] == x["grid_hold"]
-    assert [int(v) for v in r["p95_pacu"]] == x["grid_pacu"]
+    # Excel's grid covers 24 hours (96 intervals); the model's runs 48 hours, and the extra 24 must be empty
+    assert [int(v) for v in r["p95_hold"][:96]] == x["grid_hold"] and not any(r["p95_hold"][96:])
+    assert [int(v) for v in r["p95_pacu"][:96]] == x["grid_pacu"] and not any(r["p95_pacu"][96:])
 
 
 # ---------------------------------------------------------------- 3. an independent brute-force model
@@ -182,8 +183,8 @@ def test_internal_consistency(engine):
         assert r["avail"] == max(0, p["hold_beds"] - p["obs"])
         assert r["obs_fit"] == max(0, p["hold_beds"] - r["need_hold"])
         assert r["need_hold"] <= r["max_hold"] and r["need_pacu"] <= r["max_pacu"]
-        assert r["over_pacu"] == pytest.approx(r["curve_pacu"][min(p["pacu_beds"], 30)])
-        assert r["over_hold"] == pytest.approx(r["curve_hold"][min(r["avail"], 30)])
+        assert r["over_pacu"] == pytest.approx(r["curve_pacu"][min(p["pacu_beds"], len(r["curve_pacu"]) - 1)])
+        assert r["over_hold"] == pytest.approx(r["curve_hold"][min(r["avail"], len(r["curve_hold"]) - 1)])
         for c in (r["curve_hold"], r["curve_pacu"]):
             assert all(x >= y for x, y in zip(c, c[1:])), "more beds can never mean more days over"
         assert r["last_pacu_p95"] >= r["last_or_p95"] - 1e-9
@@ -215,3 +216,65 @@ def test_typical_day_never_above_busy_day(engine):
     r = sim_core.simulate(dict(reps=300), engine=engine)
     for stage in ("hold", "pacu"):
         assert all(t <= b + 1e-9 for t, b in zip(r[f"p50_{stage}"], r[f"p95_{stage}"]))
+
+
+# ---------------------------------------------------------------- 7. bigger environments
+@pytest.mark.parametrize("engine", ENGINES)
+def test_large_environment_runs_and_matches_brute_force(engine, monkeypatch):
+    """20 ORs x 14 cases: the day runs past midnight and the 36-hour grid still holds every patient."""
+    rng = np.random.default_rng(5)
+    pre, ort, pac = random_draws(rng, 20 * 14)
+    ref = reference_day(pre, ort, pac, 14, n_or=20)
+    r = run_with_draws(engine, monkeypatch, pre, ort, pac, 14, n_or=20)
+    assert (r["need_hold"], r["need_pacu"]) == (ref["peak_hold"], ref["peak_pacu"])
+    assert [int(v) for v in r["p95_pacu"]] == ref["grid_pacu"]
+    assert ref["last_pacu"] < sim_core.T0 + sim_core.NB * sim_core.BIN      # nobody falls off the end of the grid
+
+
+# ---------- occupancy and goal-seek ----------
+def test_avg_census_hand_calculation():
+    """1 OR, 2 cases, no variation: pre-op 6:30-7:30 and 8:00-9:00 -> 120 patient-min over 150 min = 0.8;
+    PACU 8:30-10:00 and 10:00-11:30 -> 180 over 180 = 1.0."""
+    p = dict(n_or=1, cases=2, pre_s=0, or_s=0, pacu_s=0, reps=3)
+    for eng in ("numpy", "python"):
+        r = sim_core.simulate(p, engine=eng)
+        assert r["avg_census_hold"] == pytest.approx(0.8)
+        assert r["avg_census_pacu"] == pytest.approx(1.0)
+
+
+def test_avg_census_engines_agree_and_below_peak():
+    a, b = sim_core.simulate(engine="numpy"), sim_core.simulate(engine="python")
+    assert a["avg_census_pacu"] == pytest.approx(b["avg_census_pacu"], rel=0.02)
+    assert a["avg_census_hold"] == pytest.approx(b["avg_census_hold"], rel=0.02)
+    assert a["avg_census_pacu"] < a["mean_pacu"] and a["avg_census_hold"] < a["mean_hold"]
+
+
+def test_occupancy():
+    assert sim_core.occupancy(9, 12) == pytest.approx(0.75)
+    assert sim_core.occupancy(9, 0) is None
+
+
+def test_fits_checks_each_target():
+    r = {"need_hold": 10, "avail": 9, "need_pacu": 12, "params": {"pacu_beds": 12}, "last_or_p95": 1200}
+    assert not sim_core.fits(r)
+    assert sim_core.fits(r, ("pacu",))
+    assert not sim_core.fits(r, ("pacu",), end_by=1140)
+    assert sim_core.fits(r, ("pacu",), end_by=1200)
+
+
+def test_find_limit_max_and_min():
+    p = {**sim_core.DEFAULTS, "reps": 100}
+    best, runs = sim_core.find_limit(p, "n_or", range(1, 12))
+    assert best is not None
+    for v, r in runs:                       # everything up to the answer fits; the next one doesn't
+        if v <= best:
+            assert sim_core.fits(r)
+    if best < 11:
+        assert not sim_core.fits(dict(runs)[best + 1])
+    # plenty of beds -> every value fits, max returns the last value tried
+    big = {**p, "hold_beds": 200, "obs": 0, "pacu_beds": 200}
+    assert sim_core.find_limit(big, "cases", range(1, 6))[0] == 5
+    # min returns the first value that fits
+    assert sim_core.find_limit(big, "waves", range(1, 4), goal="min")[0] == 1
+    # impossible target -> None
+    assert sim_core.find_limit({**p, "pacu_beds": 0}, "cases", range(1, 4))[0] is None

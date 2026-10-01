@@ -11,7 +11,7 @@ how many 23-hr Obs patients the Holding Room can still hold, and how long the OR
 
 ## What's in the app
 
-- **Results:** beds needed at your service level (any level from 50% to 99.5%), a plain-language "What this means" summary, average bed occupancy, time-of-day charts and a bed sizing curve.
+- **Results:** the case's four questions answered for the run on screen (question 4 reruns it at the other volume), beds needed at your service level (any level from 50% to 99.5%), a plain-language "What this means" summary, average bed occupancy, time-of-day charts and a bed sizing curve.
 - **Find the limit:** goal-seek the most cases per OR, the most ORs, or the fewest start waves that fit your beds (and, optionally, a latest OR finish time).
 - **View the Python behind these results:** the exact inputs of the run on screen as a runnable script that reproduces its answers, plus the model code.
 - **Guide:** what every input and result means, and how service level differs from occupancy.
@@ -41,6 +41,8 @@ up to 40 ORs, 20 cases per OR, 6 start waves and 200 beds. Long days are tracked
 - Pre-op ~ Normal(60, 30), OR ~ Normal(60, 20), PACU ~ Normal(90, 40) minutes.
 - 23 Holding Room beds (14 used by Obs patients), 12 PACU beds.
 - Patients are pulled into pre-op so it ends when their OR is ready (the OR is the bottleneck); an optional early-arrival cushion can be added.
+- Obs patients are assumed to be in their Holding Room beds while surgical patients use pre-op (slide 8 treats the 14 Obs beds as unavailable). Obs patients are evening/overnight, so the app also shows when pre-op empties and all 23 beds free up. PACU-to-Obs transfers aren't modeled.
+- Times are drawn as in the Excel template: ABS(INT(NORM.INV(RAND(), mean, sd))).
 - PACU blocking isn't modeled: the model counts beds needed. Staffing and transport time are excluded.
 
 ## Validation

@@ -109,7 +109,8 @@ with st.sidebar.form("inputs"):
         st.number_input("Cases per OR per day", 1, 20, key="in_cases",
                         help="Up to 20. Long days run past midnight; the model tracks 48 hours from 4:00 AM.")
         st.number_input("Number of ORs", 1, 40, key="in_n_or")
-        st.time_input("First case in", key="in_first", step=900)
+        st.time_input("First case in", key="in_first", step=900,
+                      help="The case: all ORs start at 7:30 AM. The charts start at 4:00 AM, so keep the first case after about 6:00 AM.")
         st.number_input("Start waves", 1, 6, key="in_waves", help="1 = every OR starts at the first-case time. ORs are split as evenly as possible.")
         st.number_input("Minutes between waves", 0, 180, step=15, key="in_wave_gap")
         st.number_input("OR turnover (min)", 0, 240, key="in_turnover")
@@ -175,7 +176,10 @@ with tab_res:
     st.markdown(f"**Showing:** {st.session_state.result_label}")
     k = st.columns(5)
     k[0].metric("Pre-op beds needed", r["need_hold"], help=f"Enough on {LEVEL} of simulated days", delta=f"{r['need_hold'] - r['avail']:+d} vs {r['avail']} free", delta_color="inverse")
-    k[1].metric("Obs patients that fit all day", r["obs_fit"], f"{r['obs_fit'] - rp['obs']:+d} vs today's {rp['obs']}")
+    k[1].metric("Obs patients that fit all day", r["obs_fit"], f"{r['obs_fit'] - rp['obs']:+d} vs today's {rp['obs']}",
+                help="Holding Room beds minus pre-op beds needed. Assumes Obs patients are in their beds while surgical patients "
+                     "use pre-op, as the case's data slide treats the 14 Obs beds as unavailable. Obs patients are evening/overnight, "
+                     "so once pre-op empties, every Holding Room bed is free for them.")
     k[2].metric("PACU beds needed", r["need_pacu"], help=f"Enough on {LEVEL} of simulated days", delta=f"{r['need_pacu'] - rp['pacu_beds']:+d} vs {rp['pacu_beds']} beds", delta_color="inverse")
     k[3].metric("Days PACU runs over", f"{r['over_pacu']:.0%}", help=f"Share of simulated days PACU needed more than its {rp['pacu_beds']} beds at some point.")
     k[4].metric("Last case out of the OR", clock(r["last_or_mean"]), f"{LEVEL} of days by {clock(r['last_or_p95'])}", delta_color="off")
@@ -192,7 +196,8 @@ with tab_res:
     lines = [
         stage_line("Pre-op", r["need_hold"], r["avail"], "beds free after Obs patients", r["over_hold"]),
         (f"**Obs patients:** sized for pre-op, the Holding Room can keep **{r['obs_fit']}** Obs patients all day "
-         f"(today: {rp['obs']})."),
+         f"(today: {rp['obs']}). Pre-op is empty after **{clock(r['hold_empty_after'])}** on {LEVEL} of days; after that "
+         f"all {rp['hold_beds']} Holding Room beds are free for evening/overnight Obs patients."),
         stage_line("PACU", r["need_pacu"], rp["pacu_beds"], "PACU beds", r["over_pacu"]),
         (f"**OR day:** the last case leaves the OR around **{clock(r['last_or_mean'])}** on an average day, "
          f"and by {clock(r['last_or_p95'])} on {LEVEL} of days."),
@@ -200,6 +205,38 @@ with tab_res:
     with st.container(border=True):
         st.markdown("##### What this means")
         st.markdown("\n".join(f"- {l}" for l in lines))
+
+    # ---------- the case's four questions (slides 5 and 10), for the run on screen ----------
+    alt_cases = 4 if rp["cases"] != 4 else 8          # Q4 compares 88 vs 44 cases/day: 8 vs 4 cases per OR
+    ra = run(tuple(sorted({**rp, "cases": alt_cases}.items())), _model_mtime)
+    vol, vol_alt = rp["n_or"] * rp["cases"], rp["n_or"] * alt_cases
+    short = [f"pre-op needs {r['need_hold']} beds vs {r['avail']} free" if r["need_hold"] > r["avail"] else None,
+             f"PACU needs {r['need_pacu']} beds vs {rp['pacu_beds']}" if r["need_pacu"] > rp["pacu_beds"] else None]
+    short = [x for x in short if x]
+    q1 = ("**No.** " + (lambda t: t[:1].upper() + t[1:])("; ".join(short)) + "." if short else
+          f"**Yes.** Pre-op needs {r['need_hold']} of {r['avail']} free beds and PACU {r['need_pacu']} of {rp['pacu_beds']}.")
+    q2 = (f"**{r['obs_fit']}** all day (today: {rp['obs']}). All {rp['hold_beds']} beds are free for evening/overnight Obs "
+          f"after {clock(r['hold_empty_after'])}.")
+    where = [w for w, bad in (("pre-op", r["need_hold"] > r["avail"]), ("PACU", r["need_pacu"] > rp["pacu_beds"])) if bad]
+    q3 = ((f"**Yes, in {' and '.join(where)}.** " if where else "**No.** ") +
+          f"PACU runs over on {r['over_pacu']:.0%} of days; the last case leaves the OR around {clock(r['last_or_mean'])}.")
+    def diff(a, b):
+        return "same" if a == b else f"{a - b:+d}"
+    q4 = (f"At **{vol_alt}** cases/day: pre-op {ra['need_hold']} ({diff(ra['need_hold'], r['need_hold'])}), "
+          f"PACU {ra['need_pacu']} ({diff(ra['need_pacu'], r['need_pacu'])}), Obs {ra['obs_fit']}, "
+          f"last case out around {clock(ra['last_or_mean'])}, pre-op empty after {clock(ra['hold_empty_after'])}. "
+          "Bed needs barely move because the morning rush (every OR starting at once) sets the peak; volume mainly changes how long the day runs.")
+    with st.expander(f"The case's four questions, answered for this run ({vol} cases/day)", expanded=True):
+        st.markdown(f"""
+| Question (slides 5 and 10) | Answer |
+|---|---|
+| 1. Do we have enough pre- and post-op beds for higher volume and shorter case lengths? | {q1} |
+| 2. How many 23-hr Obs patients can we continue to hold in pre-op? | {q2} |
+| 3. Is the expected increase in OR case volume going to overwhelm our capacity? | {q3} |
+| 4. Will the answers change at {vol_alt} instead of {vol} cases/day? | {q4} |
+""")
+        st.caption(f"Q4 reruns these exact inputs with {alt_cases} cases per OR. Beds needed are enough on {LEVEL} of days; "
+                   "a 1-bed difference between runs can be random noise.")
 
     # ---------- occupancy: how full the beds are on average ----------
     st.markdown("##### How full are the beds on average?")
@@ -254,8 +291,9 @@ with tab_res:
         col.subheader(title)
         window = f"Showing {clock(sim_core.T0 + lo * sim_core.BIN)} to {clock(sim_core.T0 + hi * sim_core.BIN)}, the hours with patients. "
         col.caption(window + f"Red dashed line: {'beds free after Obs patients' if stage == 'hold' else 'PACU beds'}. "
-                    "Each 15-minute interval is summarized on its own, so the gold line's peak can sit a bed below "
-                    "“beds needed”, which sizes the whole day.")
+                    "A patient counts in every 15-minute interval they're in for any part of. Each interval is summarized "
+                    "on its own, and the busiest moment falls at different times on different days, so the gold line's peak "
+                    "can sit a bed or two below “beds needed”, which sizes each day's busiest moment.")
         col.altair_chart((band + lines + rule).properties(height=270), width="stretch")
 
     st.subheader("How many beds would be enough?")
@@ -306,10 +344,17 @@ def use_best():
     st.session_state.preset = CUSTOM
 
 
+@st.cache_data(show_spinner=False, max_entries=32)
+def limit(p_items, label, must, end_by, model_version):
+    key, values, direction, _ = GOALS[label]
+    return sim_core.find_limit(dict(p_items), key, list(values), direction, MUST[must], end_by)
+
+
 with tab_goal:
-    st.markdown("Pick what to solve for and the target to hit. The tool tries every value, holding the rest of the "
-                "sidebar inputs fixed (beds, times, service level), and reports the limit. You don't need to press "
-                "Run simulation first.")
+    st.markdown("Pick what to solve for and the target to hit, then press **Find it**. The tool tries every value, "
+                "holding the rest of the sidebar inputs fixed (beds, times, service level), and reports the limit.")
+    st.caption("To change those inputs, edit the sidebar and press **Run simulation**: sidebar changes only take effect "
+               "when you press it. The answer here then updates on its own.")
     with st.form("goal_form"):
         g1, g2 = st.columns(2)
         goal_label = g1.selectbox("Find", list(GOALS), key="goal_find")
@@ -319,13 +364,21 @@ with tab_goal:
         end_on = st.checkbox("…and the last case is out of the OR by", key="goal_end_on", help=f"Checked on the same share of days as your service level.")
         end_t = st.time_input("Latest OR finish", dtime(19, 0), step=900, label_visibility="collapsed")
         go = st.form_submit_button("Find it", type="primary")
-    if go:
-        key, values, direction, unit = GOALS[goal_label]
-        end_by = end_t.hour * 60 + end_t.minute if end_on else None
+    if go:   # remember the question; the answer is recomputed below from the sidebar inputs in effect
+        st.session_state.goal_spec = dict(label=goal_label, must=must_label,
+                                          end_by=end_t.hour * 60 + end_t.minute if end_on else None)
+    spec = st.session_state.get("goal_spec")
+    if spec:
+        key, values, direction, unit = GOALS[spec["label"]]
         with st.spinner(f"Trying {len(values)} settings…"):
-            best, runs = sim_core.find_limit(params, key, values, direction, MUST[must_label], end_by)
-        st.session_state.goal = dict(key=key, best=best, runs=runs, direction=direction, unit=unit, label=goal_label,
-                                     must=must_label, end_by=end_by, params=params)
+            best, runs = limit(tuple(sorted(params.items())), spec["label"], spec["must"], spec["end_by"], _model_mtime)
+        st.session_state.goal = dict(key=key, best=best, runs=runs, direction=direction, unit=unit, label=spec["label"],
+                                     must=spec["must"], end_by=spec["end_by"], params=params)
+        st.caption(f"Using the sidebar inputs in effect: {params['n_or']} ORs × {params['cases']} cases, "
+                   f"{params['waves']} start wave{'s' if params['waves'] != 1 else ''}, "
+                   f"{max(0, params['hold_beds'] - params['obs'])} free pre-op beds ({params['hold_beds']} − {params['obs']} Obs), "
+                   f"{params['pacu_beds']} PACU beds, enough on {pct(params['service_level'])} of days, {params['reps']:,} simulated days "
+                   f"(the value being solved for is varied).")
     g = st.session_state.get("goal")
     if g:
         gp, runs = g["params"], g["runs"]
@@ -387,6 +440,17 @@ with tab_goal:
 # ---------- guide ----------
 with tab_guide:
     st.markdown("""
+#### The case
+
+An 11-OR onsite site is being converted to a low-acuity surgical center, and offsite services are moving onsite. The ORs do about **2.5 cases per OR per day** today; the plan is **up to 88 cases a day** (8 per OR) with shorter cases. Patients flow **Holding Room (23 pre-op beds) → 11 ORs → PACU (12 recovery beds)**. Up to **14 of the 23 pre-op beds** hold evening/overnight 23-hour observation (Obs) patients, transferred in from PACU, which leaves 9 for surgical patients.
+
+| Case question (slides 5 and 10) | Where the app answers it |
+|---|---|
+| 1. Do we have enough pre- and post-op beds for higher volume and shorter case lengths? | *Pre-op beds needed* and *PACU beds needed*, compared with the beds you have. |
+| 2. How many 23-hr Obs patients can we continue to hold in pre-op? | *Obs patients that fit all day*, plus the time pre-op empties for evening Obs patients. |
+| 3. Is the expected increase in OR case volume going to overwhelm our capacity? | *Days PACU runs over*, the time-of-day charts, and *Last case out of the OR*. |
+| 4. Will the answers change at 44 instead of 88 cases a day? | The *four questions* box reruns your inputs at the other volume. You can also pin both presets and compare. |
+
 #### How to use the simulator
 
 1. **Pick a starting point.** In the sidebar, *Start from a what-if* fills in a ready-made scenario: the case baseline (88 cases a day), 44 cases a day, staggered start waves, patients arriving early, or 18 PACU beds. Pick **Custom** to model your own environment; editing a preset and pressing Run also switches to Custom.
@@ -394,6 +458,8 @@ with tab_guide:
 3. **Read the Results tab.** Start with *What this means*, then the numbers and charts.
 4. **Find a limit.** The **Find the limit** tab answers "how far can we push it?" questions, like the most cases per OR your beds can handle.
 5. **Compare.** Press *Pin last run* after each scenario to line them up in one table. Keep the same random seed so differences come from your change, not from luck.
+
+In **Find the limit**, the *Fits* column marks each setting that meets your target (✓) or misses it (blank). For "most" goals the answer is the last ✓ before the first blank; for "fewest start waves" it's the first ✓.
 
 #### The inputs
 
@@ -419,18 +485,26 @@ with tab_guide:
 |---|---|
 | Beds needed | The fewest beds that cover the whole day, busiest moment included, on your service level's share of days. This sizes for the **peak**. |
 | Obs patients that fit | Holding Room beds left over for Obs patients after setting aside the pre-op beds needed. |
-| Days over | Share of simulated days a unit needed more beds than it has, at some point in the day. |
+| Days over | Share of simulated days a unit needed more beds than it has at some point in the day (for pre-op, more than the beds free after Obs patients). |
 | Average occupancy | Average share of beds filled while the unit has patients. This measures the **average**, not the peak. |
-| Typical day / busy day | On the time-of-day charts: the median day (grey) and a day at your service level (gold), 15 minutes at a time. |
+| Typical day / busy day | On the time-of-day charts, for each 15-minute interval: the median across simulated days (grey) and your service level's percentile (gold). A patient counts in every interval they're in for any part of. |
 | Last case out | When the last OR case of the day ends, on an average day and on your service level's share of days. |
 
 #### Service level vs occupancy
 
-They answer different questions. **Service level** asks "is there a bed at the busiest moment, on most days?" **Occupancy** asks "how full are the beds on average?" Because demand swings from day to day, beds sized to cover busy days sit partly empty on an average day. In the case baseline, 18 PACU beds cover 95% of days at about 51% average occupancy. Today's 12 beds are about 77% full on average, which looks comfortable, yet PACU runs short on every simulated day, because the patients arrive in bunches. That's why the tool sizes beds on the peak and shows occupancy alongside it.
+They answer different questions. **Service level** asks "is there a bed at the busiest moment, on most days?" **Occupancy** asks "how full are the beds on average?" Because demand swings from day to day, beds sized to cover busy days sit partly empty on an average day. In the case baseline, 18 PACU beds cover 95% of days at about 51% average occupancy. Today's 12 beds are about 77% full on average, which looks comfortable, yet PACU runs short on 999 of 1,000 simulated days, because the patients arrive in bunches. That's why the tool sizes beds on the peak and shows occupancy alongside it.
 
 #### What the model assumes
 
-Patients are brought into pre-op so it ends just as their OR is ready (the OR is the bottleneck). Each case starts when the previous one ends plus turnover. Times follow a normal distribution. The model counts the beds needed; it doesn't make patients wait when PACU is full (in real life they would hold in the OR). Staffing and transport time are excluded, per the case.
+From the case (slides 8 and 9): times are normally distributed (pre-op 60 ± 30, OR 60 ± 20, PACU 90 ± 40 minutes); first cases enter the OR at exactly 7:30 AM; 8 or 4 cases per OR; cases are scheduled in advance in their assigned OR; 30-minute turnover; staffing is not a constraint; no transport time.
+
+Added by the model:
+
+- **The OR is the bottleneck** (the slide 6 hint: Goldratt's *The Goal*), so the model is kept simple, without block schedules, booking patterns or shifts. Patients are brought into pre-op so it ends just as their OR is ready. Each case starts when the previous one ends plus turnover.
+- **Random times** are drawn as in the Excel template, ABS(INT(NORM.INV(RAND(), mean, sd))): rounded down to whole minutes, with the rare negative draw flipped to positive.
+- **Obs patients** are assumed to be in their Holding Room beds while surgical patients use pre-op, as slide 8 treats the 14 Obs beds as unavailable. Moving patients from PACU to Obs beds isn't modeled; every PACU patient simply leaves.
+- **PACU blocking isn't modeled.** The model counts the beds needed. In real life, when PACU is full, patients wait in the OR and later cases start late.
+- **Early arrival** is 0 by default (just in time, the best case), because the slides don't give it.
 """)
 
 # ---------- the Python behind the results shown ----------
