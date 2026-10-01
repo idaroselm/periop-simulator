@@ -168,7 +168,8 @@ if first_visit:
     st.info("New here? The **Guide** tab explains every input and result in plain language.")
 
 # Keyed so the open tab survives reruns (e.g. pressing "Find it" keeps you on Find the limit)
-tab_res, tab_goal, tab_guide = st.tabs(["Results", "Find the limit", "Guide"], key="tab", on_change="rerun")
+tab_res, tab_case, tab_goal, tab_guide = st.tabs(["Results", "Case questions", "Find the limit", "Guide"],
+                                                  key="tab", on_change="rerun")
 
 with tab_res:
     if stale:
@@ -205,38 +206,6 @@ with tab_res:
     with st.container(border=True):
         st.markdown("##### What this means")
         st.markdown("\n".join(f"- {l}" for l in lines))
-
-    # ---------- the case's four questions (slides 5 and 10), for the run on screen ----------
-    alt_cases = 4 if rp["cases"] != 4 else 8          # Q4 compares 88 vs 44 cases/day: 8 vs 4 cases per OR
-    ra = run(tuple(sorted({**rp, "cases": alt_cases}.items())), _model_mtime)
-    vol, vol_alt = rp["n_or"] * rp["cases"], rp["n_or"] * alt_cases
-    short = [f"pre-op needs {r['need_hold']} beds vs {r['avail']} free" if r["need_hold"] > r["avail"] else None,
-             f"PACU needs {r['need_pacu']} beds vs {rp['pacu_beds']}" if r["need_pacu"] > rp["pacu_beds"] else None]
-    short = [x for x in short if x]
-    q1 = ("**No.** " + (lambda t: t[:1].upper() + t[1:])("; ".join(short)) + "." if short else
-          f"**Yes.** Pre-op needs {r['need_hold']} of {r['avail']} free beds and PACU {r['need_pacu']} of {rp['pacu_beds']}.")
-    q2 = (f"**{r['obs_fit']}** all day (today: {rp['obs']}). All {rp['hold_beds']} beds are free for evening/overnight Obs "
-          f"after {clock(r['hold_empty_after'])}.")
-    where = [w for w, bad in (("pre-op", r["need_hold"] > r["avail"]), ("PACU", r["need_pacu"] > rp["pacu_beds"])) if bad]
-    q3 = ((f"**Yes, in {' and '.join(where)}.** " if where else "**No.** ") +
-          f"PACU runs over on {r['over_pacu']:.0%} of days; the last case leaves the OR around {clock(r['last_or_mean'])}.")
-    def diff(a, b):
-        return "same" if a == b else f"{a - b:+d}"
-    q4 = (f"At **{vol_alt}** cases/day: pre-op {ra['need_hold']} ({diff(ra['need_hold'], r['need_hold'])}), "
-          f"PACU {ra['need_pacu']} ({diff(ra['need_pacu'], r['need_pacu'])}), Obs {ra['obs_fit']}, "
-          f"last case out around {clock(ra['last_or_mean'])}, pre-op empty after {clock(ra['hold_empty_after'])}. "
-          "Bed needs barely move because the morning rush (every OR starting at once) sets the peak; volume mainly changes how long the day runs.")
-    with st.expander(f"The case's four questions, answered for this run ({vol} cases/day)", expanded=True):
-        st.markdown(f"""
-| Question (slides 5 and 10) | Answer |
-|---|---|
-| 1. Do we have enough pre- and post-op beds for higher volume and shorter case lengths? | {q1} |
-| 2. How many 23-hr Obs patients can we continue to hold in pre-op? | {q2} |
-| 3. Is the expected increase in OR case volume going to overwhelm our capacity? | {q3} |
-| 4. Will the answers change at {vol_alt} instead of {vol} cases/day? | {q4} |
-""")
-        st.caption(f"Q4 reruns these exact inputs with {alt_cases} cases per OR. Beds needed are enough on {LEVEL} of days; "
-                   "a 1-bed difference between runs can be random noise.")
 
     # ---------- occupancy: how full the beds are on average ----------
     st.markdown("##### How full are the beds on average?")
@@ -326,6 +295,71 @@ with tab_res:
     if st.session_state.pins:
         st.subheader("Pinned scenarios")
         st.dataframe(pd.DataFrame(st.session_state.pins), width="stretch", hide_index=True)
+
+# ---------- case questions (slides 5 and 10), for the run on screen vs the other volume ----------
+with tab_case:
+    alt_cases = 4 if rp["cases"] != 4 else 8          # the case compares 88 vs 44 cases/day: 8 vs 4 cases per OR
+    ra = run(tuple(sorted({**rp, "cases": alt_cases}.items())), _model_mtime)
+    vol, vol_alt = rp["n_or"] * rp["cases"], rp["n_or"] * alt_cases
+
+    def shortfalls(x):
+        out = []
+        if x["need_hold"] > x["avail"]:
+            out.append("pre-op")
+        if x["need_pacu"] > x["params"]["pacu_beds"]:
+            out.append("PACU")
+        return out
+
+    def beds_cell(x):
+        return f"Pre-op **{x['need_hold']}** vs {x['avail']} free · PACU **{x['need_pacu']}** vs {x['params']['pacu_beds']}"
+
+    def obs_cell(x):
+        return f"**{x['obs_fit']}** all day · all {x['params']['hold_beds']} beds free after {clock(x['hold_empty_after'])}"
+
+    def load_cell(x):
+        return (f"PACU over on **{x['over_pacu']:.0%}** of days, busy until {clock(x['last_pacu_p95'])} · "
+                f"last case out ~**{clock(x['last_or_mean'])}**")
+
+    def day_cell(x):
+        return f"Last case out ~{clock(x['last_or_mean'])} · pre-op empty after {clock(x['hold_empty_after'])}"
+
+    sh, sha = shortfalls(r), shortfalls(ra)
+    if sh and sha:
+        a1 = "**No.** " + ("Both stages fall short" if len(sh) == 2 and len(sha) == 2 else "Beds fall short") + " at either volume."
+    elif sh:
+        a1 = f"**No** at {vol} cases/day ({' and '.join(sh)}); enough at {vol_alt}."
+    elif sha:
+        a1 = f"**Yes** at {vol} cases/day; not at {vol_alt} ({' and '.join(sha)})."
+    else:
+        a1 = "**Yes** at either volume."
+    lo, hi = sorted((r["obs_fit"], ra["obs_fit"]))
+    a2 = (f"**{lo}{'' if lo == hi else f'–{hi}'}** Obs patients all day (today: {rp['obs']}). "
+          "They're evening/overnight patients, so more fit once pre-op empties.")
+    a3 = (f"**Yes, in {' and '.join(sh)}.** The ORs can do the cases; the beds around them can't keep up." if sh
+          else "**No.** Pre-op and PACU have enough beds on most days.")
+    d_beds = max(abs(r["need_hold"] - ra["need_hold"]), abs(r["need_pacu"] - ra["need_pacu"]))
+    d_hours = abs(r["last_or_mean"] - ra["last_or_mean"]) / 60
+    a4 = (("**Barely for beds" if d_beds <= 1 else f"**Beds change by up to {d_beds}") +
+          f"; a lot for timing.** The OR day is about {d_hours:.0f} hours {'shorter' if alt_cases < rp['cases'] else 'longer'} at {vol_alt} cases/day."
+          if d_hours >= 1 else
+          ("**Barely.**" if d_beds <= 1 else f"**Beds change by up to {d_beds}.**"))
+
+    st.markdown(f"Answers for the run on screen (**{st.session_state.result_label}**, {vol} cases/day), compared with the "
+                f"same inputs at {vol_alt} cases/day ({alt_cases} per OR). Beds needed are enough on {LEVEL} of days.")
+    if stale:
+        st.info("You changed the inputs. These answers are still from the last run. Press **Run simulation** to update them.")
+    st.markdown(f"""
+| Case question (slides 5 and 10) | Answer | {vol} cases/day (this run) | {vol_alt} cases/day |
+|---|---|---|---|
+| 1. Do we have enough pre- and post-op beds for higher volume and shorter case lengths? | {a1} | {beds_cell(r)} | {beds_cell(ra)} |
+| 2. How many 23-hr Obs patients can we continue to hold in pre-op? | {a2} | {obs_cell(r)} | {obs_cell(ra)} |
+| 3. Is the expected increase in OR case volume going to overwhelm our capacity? | {a3} | {load_cell(r)} | {load_cell(ra)} |
+| 4. Will the answers change at {vol_alt} instead of {vol} cases/day? | {a4} | {day_cell(r)} | {day_cell(ra)} |
+""")
+    why = ("Bed needs barely move with volume because the peak comes from every OR starting at the same time, which happens "
+           "at either volume. Volume mainly changes how long the day runs. " if rp["waves"] == 1 else "")
+    st.caption(why + f"Pre-op beds free = Holding Room beds − Obs patients. Times marked ~ are averages; “busy until” and "
+               f"“empty after” are on {LEVEL} of days. A 1-bed difference between runs can be random noise.")
 
 # ---------- find the limit (goal-seek) ----------
 GOALS = {   # label: (input, values tried, "max" or "min", unit for the sentence)
@@ -449,13 +483,13 @@ An 11-OR onsite site is being converted to a low-acuity surgical center, and off
 | 1. Do we have enough pre- and post-op beds for higher volume and shorter case lengths? | *Pre-op beds needed* and *PACU beds needed*, compared with the beds you have. |
 | 2. How many 23-hr Obs patients can we continue to hold in pre-op? | *Obs patients that fit all day*, plus the time pre-op empties for evening Obs patients. |
 | 3. Is the expected increase in OR case volume going to overwhelm our capacity? | *Days PACU runs over*, the time-of-day charts, and *Last case out of the OR*. |
-| 4. Will the answers change at 44 instead of 88 cases a day? | The *four questions* box reruns your inputs at the other volume. You can also pin both presets and compare. |
+| 4. Will the answers change at 44 instead of 88 cases a day? | The **Case questions** tab answers all four for your run and reruns it at the other volume. You can also pin both presets and compare. |
 
 #### How to use the simulator
 
 1. **Pick a starting point.** In the sidebar, *Start from a what-if* fills in a ready-made scenario: the case baseline (88 cases a day), 44 cases a day, staggered start waves, patients arriving early, or 18 PACU beds. Pick **Custom** to model your own environment; editing a preset and pressing Run also switches to Custom.
 2. **Change the inputs.** Every box in the sidebar can be edited. Nothing changes on screen until you press **Run simulation**, and a blue note reminds you when the results are out of date.
-3. **Read the Results tab.** Start with *What this means*, then the numbers and charts.
+3. **Read the Results tab.** Start with *What this means*, then the numbers and charts. The **Case questions** tab answers the four case questions for the same run.
 4. **Find a limit.** The **Find the limit** tab answers "how far can we push it?" questions, like the most cases per OR your beds can handle.
 5. **Compare.** Press *Pin last run* after each scenario to line them up in one table. Keep the same random seed so differences come from your change, not from luck.
 
