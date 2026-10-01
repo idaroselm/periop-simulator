@@ -12,12 +12,13 @@ import math
 import random
 import time
 
-T0, NB, BIN = 240, 96, 15          # grid: 96 x 15-min intervals starting 4:00 AM (minutes after midnight)
+T0, NB, BIN = 240, 192, 15         # grid: 192 x 15-min intervals = 48 hours from 4:00 AM, room for long OR days
 
-DEFAULTS = dict(n_or=11, cases=8, first=450, waves=1, wave_gap=30, turnover=30,
+DEFAULTS = dict(n_or=11, cases=8, first=450, waves=1, wave_gap=45, turnover=30,
                 pre_m=60, pre_s=30, or_m=60, or_s=20, pacu_m=90, pacu_s=40,
-                hold_beds=23, obs=14, pacu_beds=12, buf_min=0, buf_max=0, reps=100, seed=6473,
+                hold_beds=23, obs=14, pacu_beds=12, buf_min=0, buf_max=0, reps=1000, seed=6473,
                 service_level=0.95)   # beds are sized to be enough on this share of simulated days
+# The case baseline. reps=1000 simulated days gives a steady answer (use reps=100 to mirror the Excel log's size).
 
 
 def draw(rng, m, s):
@@ -57,6 +58,17 @@ def percentile(vals, q):
     return s[f] + (k - f) * (s[f + 1] - s[f]) if f + 1 < len(s) else s[f]
 
 
+def curve_len(*peak_lists):
+    """Bed counts for the sizing curve: 0 up to one past the busiest simulated day (at least 0..30)."""
+    return max(31, max(max(v) for v in peak_lists) + 2)
+
+
+def avg_census(ins, outs):
+    """Average patients present while the unit is in use (first arrival to last departure) = patient-minutes / window."""
+    window = max(outs) - min(ins)
+    return sum(o - i for i, o in zip(ins, outs)) / window if window > 0 else 0.0
+
+
 def wave_starts(p):
     """Split the ORs into waves as evenly as possible (11 ORs: 1 wave 11 / 2 waves 6+5 / 3 waves 4+4+3)."""
     n = p["n_or"]
@@ -68,7 +80,7 @@ def simulate_py(p):
     t_start = time.perf_counter()
     rng = random.Random(p["seed"])
     starts = wave_starts(p)
-    peaks_h, peaks_p, last_or, last_pacu = [], [], [], []
+    peaks_h, peaks_p, last_or, last_pacu, cen_h, cen_p = [], [], [], [], [], []
     grid_h, grid_p = [], []
     for _ in range(p["reps"]):
         h_in, h_out, p_in, p_out = [], [], [], []
@@ -92,6 +104,8 @@ def simulate_py(p):
         peaks_p.append(peak(p_in, p_out))
         last_or.append(max(p_in))
         last_pacu.append(max(p_out))
+        cen_h.append(avg_census(h_in, h_out))
+        cen_p.append(avg_census(p_in, p_out))
         grid_h.append(gh)
         grid_p.append(gp)
 
@@ -113,6 +127,8 @@ def simulate_py(p):
         "need_pacu": need_p,
         "mean_hold": sum(peaks_h) / n,
         "mean_pacu": sum(peaks_p) / n,
+        "avg_census_hold": sum(cen_h) / n,      # average patients present while the unit is in use
+        "avg_census_pacu": sum(cen_p) / n,
         "max_hold": max(peaks_h),
         "max_pacu": max(peaks_p),
         "over_hold": sum(v > avail for v in peaks_h) / n,
@@ -127,9 +143,9 @@ def simulate_py(p):
         "p50_hold": p50_h,
         "p50_pacu": p50_p,
         "service_level": sl,
-        # share of days each stage would run over with N beds, N = 0..30
-        "curve_hold": [sum(v > b for v in peaks_h) / n for b in range(31)],
-        "curve_pacu": [sum(v > b for v in peaks_p) / n for b in range(31)],
+        # share of days each stage would run over with N beds, N = 0 .. (busiest day + 1, at least 30)
+        "curve_hold": [sum(v > b for v in peaks_h) / n for b in range(curve_len(peaks_h, peaks_p))],
+        "curve_pacu": [sum(v > b for v in peaks_p) / n for b in range(curve_len(peaks_h, peaks_p))],
         "elapsed_s": time.perf_counter() - t_start,
         "engine": "pure Python",
     }
@@ -161,11 +177,21 @@ def simulate_np(p):
         order = np.lexsort((d, t), axis=-1)
         return np.cumsum(np.take_along_axis(d, order, axis=1), axis=1).max(axis=1)
 
-    s0 = T0 + BIN * np.arange(NB)
-    e0 = s0 + BIN - 1 / 60
+    def grid(a, b):
+        """Patients touching each 15-min interval (Excel grid rule), via +1/-1 marks and a running sum,
+        so memory stays small even with many ORs and cases."""
+        lo = np.clip(np.ceil((a - T0 - BIN + 1 / 60) / BIN), 0, NB).astype(int)
+        hi = np.clip(np.ceil((b - T0) / BIN) - 1, -1, NB - 1).astype(int)
+        ok = hi >= lo
+        rows = np.broadcast_to(np.arange(a.shape[0])[:, None], a.shape)
+        marks = np.zeros((a.shape[0], NB + 1), int)
+        np.add.at(marks, (rows[ok], lo[ok]), 1)
+        np.add.at(marks, (rows[ok], hi[ok] + 1), -1)
+        return np.cumsum(marks, axis=1)[:, :NB]
 
-    def grid(a, b):    # patients touching each 15-min interval (Excel grid rule)
-        return ((a[:, :, None] <= e0) & (b[:, :, None] > s0)).sum(axis=1)
+    def census(a, b):   # per day: patient-minutes / (last departure - first arrival)
+        window = b.max(axis=1) - a.min(axis=1)
+        return np.where(window > 0, (b - a).sum(axis=1) / np.where(window > 0, window, 1), 0.0)
 
     pk_h, pk_p = peaks(h_in, h_out), peaks(p_in, p_out)
     sl = p["service_level"]
@@ -178,11 +204,12 @@ def simulate_np(p):
     need_h = ceil_beds(np.percentile(pk_h, 100 * sl))
     need_p = ceil_beds(np.percentile(pk_p, 100 * sl))
     busy = np.nonzero(p95_h > 0)[0]
-    beds = np.arange(31)
+    beds = np.arange(curve_len(pk_h.tolist(), pk_p.tolist()))
     return {
         "params": p, "starts": starts.tolist(), "avail": avail,
         "need_hold": need_h, "need_pacu": need_p,
         "mean_hold": float(pk_h.mean()), "mean_pacu": float(pk_p.mean()),
+        "avg_census_hold": float(census(h_in, h_out).mean()), "avg_census_pacu": float(census(p_in, p_out).mean()),
         "max_hold": int(pk_h.max()), "max_pacu": int(pk_p.max()),
         "over_hold": float((pk_h > avail).mean()), "over_pacu": float((pk_p > p["pacu_beds"]).mean()),
         "obs_fit": max(0, p["hold_beds"] - need_h),
@@ -209,6 +236,41 @@ def simulate(params=None, engine="auto"):
             if engine == "numpy":
                 raise
     return simulate_py(p)
+
+
+def occupancy(avg_census, beds):
+    """Average share of beds filled while the unit is in use (None when there are no beds)."""
+    return avg_census / beds if beds > 0 else None
+
+
+def fits(r, stages=("hold", "pacu"), end_by=None):
+    """Does this run meet the target? Beds needed <= beds available for each stage checked,
+    and (optionally) the last case is out of the OR by end_by (minutes after midnight) on the service-level share of days."""
+    ok = True
+    if "hold" in stages:
+        ok = ok and r["need_hold"] <= r["avail"]
+    if "pacu" in stages:
+        ok = ok and r["need_pacu"] <= r["params"]["pacu_beds"]
+    if end_by is not None:
+        ok = ok and r["last_or_p95"] <= end_by
+    return ok
+
+
+def find_limit(params, key, values, goal="max", stages=("hold", "pacu"), end_by=None, engine="auto"):
+    """Goal-seek one input. Runs the scenario at each value (in order) with everything else held fixed.
+    goal="max": the largest value such that it and every smaller value tried meet the target (e.g. most cases per OR).
+    goal="min": the first value that meets the target (e.g. fewest start waves).
+    Returns (best value or None, [(value, result), ...])."""
+    runs = [(v, simulate({**params, key: v}, engine)) for v in values]
+    best = None
+    for v, r in runs:
+        if fits(r, stages, end_by):
+            best = v
+            if goal == "min":
+                break
+        elif goal == "max":
+            break
+    return best, runs
 
 
 def run_json(params_json):

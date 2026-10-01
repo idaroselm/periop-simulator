@@ -4,10 +4,17 @@ MGT 6473 Healthcare Operations Management · Final project
 
 A discrete event simulation of patient flow through **Holding Room (pre-op) → 11 ORs → PACU**.
 Set the schedule, service times and bed counts, press **Run simulation**, and the app simulates
-100 days (the same as the Excel workbook's log; adjustable up to 2,000) to show how many pre-op and PACU beds are needed (enough on 95% of days),
+1,000 days by default (a steady answer; pick 100 to mirror the Excel workbook's log, or up to 2,000) to show how many pre-op and PACU beds are needed (enough on 95% of days),
 how many 23-hr Obs patients the Holding Room can still hold, and how long the OR day runs.
 
 **Live app:** https://periop-simulator-auf2ujawu9nvnr95rzxohm.streamlit.app/
+
+## What's in the app
+
+- **Results:** beds needed at your service level (any level from 50% to 99.5%), a plain-language "What this means" summary, average bed occupancy, time-of-day charts and a bed sizing curve.
+- **Find the limit:** goal-seek the most cases per OR, the most ORs, or the fewest start waves that fit your beds (and, optionally, a latest OR finish time).
+- **View the Python behind these results:** the exact inputs of the run on screen as a runnable script that reproduces its answers, plus the model code.
+- **Guide:** what every input and result means, and how service level differs from occupancy.
 
 ## Run it locally
 
@@ -26,6 +33,9 @@ streamlit run app.py
 | `tests/` | Validation tests (`pip install pytest`, then `pytest -q`) |
 
 ## Model assumptions
+
+The case baseline is below. Pick **Custom** in the what-if list to model any environment:
+up to 40 ORs, 20 cases per OR, 6 start waves and 200 beds. Long days are tracked 48 hours from 4:00 AM.
 
 - All 11 ORs start at 7:30 AM; 8 cases per OR (88/day) or 4 (44/day); 30-minute turnover.
 - Pre-op ~ Normal(60, 30), OR ~ Normal(60, 20), PACU ~ Normal(90, 40) minutes.
