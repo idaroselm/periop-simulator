@@ -23,11 +23,17 @@ st.session_state.seen = True
 
 CUSTOM = "Custom · edit any input"
 PRESETS = {
-    "Case baseline · 88/day": {},
-    "44 cases/day": {"cases": 4},
-    "Stagger starts · 3 waves": {"waves": 3, "wave_gap": 45},
-    "Patients arrive 10–45 min early": {"buf_min": 10, "buf_max": 45},
-    "PACU with 18 beds": {"pacu_beds": 18},
+    "1 · Baseline: 88 cases/day": {},
+    "2 · Lower volume: 44 cases/day": {"cases": 4},
+    "3 · Lever: stagger starts (3 waves)": {"waves": 3, "wave_gap": 45},
+    "4 · Lever: 18 PACU beds": {"pacu_beds": 18},
+    "5 · ★ Recommended: 3 waves + 18 PACU + 10 Obs": {"waves": 3, "wave_gap": 45, "pacu_beds": 18, "obs": 10},
+    "6 · Alternative: add 13 beds": {"hold_beds": 30, "pacu_beds": 18},
+}
+BASE_NAME, REC_NAME, ALT_NAME = list(PRESETS)[0], list(PRESETS)[4], list(PRESETS)[5]
+COL = {   # column headers for the tables
+    BASE_NAME: "1 · Baseline", list(PRESETS)[1]: "2 · 44/day", list(PRESETS)[2]: "3 · 3 waves",
+    list(PRESETS)[3]: "4 · 18 PACU", REC_NAME: "5 ★ Recommended", ALT_NAME: "6 · Add 13 beds",
 }
 
 
@@ -144,7 +150,7 @@ def run(p_items, model_version):
 
 # Results only change when "Run simulation" is pressed; the first visit shows the case baseline.
 if "result" not in st.session_state:
-    st.session_state.result, st.session_state.result_label = run(tuple(sorted(BASELINE.items())), _model_mtime), "Case baseline · 88/day"
+    st.session_state.result, st.session_state.result_label = run(tuple(sorted(BASELINE.items())), _model_mtime), BASE_NAME
 if st.session_state.pop("run_now", False):
     st.session_state.result = run(tuple(sorted(params.items())), _model_mtime)
     st.session_state.result_label = "Custom scenario" if st.session_state.preset == CUSTOM else st.session_state.preset
@@ -296,6 +302,63 @@ with tab_res:
         st.subheader("Pinned scenarios")
         st.dataframe(pd.DataFrame(st.session_state.pins), width="stretch", hide_index=True)
 
+# ---------- at-a-glance summary (Output table and Case questions) ----------
+def changes(p):
+    """What a scenario changes vs the case baseline, in a few words."""
+    b, out = BASELINE, []
+    if p["cases"] != b["cases"] or p["n_or"] != b["n_or"]:
+        out.append(f"{p['n_or'] * p['cases']} cases/day")
+    if p["waves"] > 1:
+        out.append(f"{p['waves']} waves")
+    if p["obs"] != b["obs"]:
+        out.append(f"Obs ≤ {p['obs']}")
+    if p["hold_beds"] != b["hold_beds"]:
+        out.append(f"{p['hold_beds'] - b['hold_beds']:+d} Holding")
+    if p["pacu_beds"] != b["pacu_beds"]:
+        out.append(f"{p['pacu_beds'] - b['pacu_beds']:+d} PACU")
+    if p["buf_max"] > 0:
+        out.append(f"arrive {p['buf_min']}–{p['buf_max']} min early")
+    other = [k for k in SCENARIO_KEYS if k not in ("cases", "n_or", "waves", "wave_gap", "obs", "hold_beds", "pacu_beds",
+                                                     "buf_min", "buf_max") and p[k] != b[k]]
+    if other:
+        out.append("other inputs changed")
+    return " · ".join(out) or "Today's plan"
+
+
+def glance_rows(x):
+    p = x["params"]
+    fits = lambda need, have: f"✓ {need} of {have}" if need <= have else f"✗ needs {need}, has {have}"
+    new_beds = (p["hold_beds"] - BASELINE["hold_beds"]) + (p["pacu_beds"] - BASELINE["pacu_beds"])
+    ok = x["need_hold"] <= x["avail"] and x["need_pacu"] <= p["pacu_beds"]
+    return [
+        ("What changes", changes(p)),
+        ("Cases per day", f"{p['n_or'] * p['cases']}"),
+        ("New beds built", f"{new_beds:+d}" if new_beds else "0"),
+        ("Pre-op beds", fits(x["need_hold"], x["avail"])),
+        ("PACU beds", fits(x["need_pacu"], p["pacu_beds"])),
+        ("Days over capacity (pre-op / PACU)", f"{x['over_hold']:.0%} / {x['over_pacu']:.0%}"),
+        ("Obs patients held all day", f"{min(p['obs'], x['obs_fit'])}" + ("" if p["obs"] <= x["obs_fit"] else f" of {p['obs']}")),
+        ("Last case out of the OR (average)", clock(x["last_or_mean"])),
+        ("Meets the planning standard?", f"✓ Yes, on {pct(p['service_level'])} of days" if ok else "✗ No"),
+    ]
+
+
+def style_glance(df, highlight=None):
+    """Green for ✓, red for ✗, gold tint on the recommended column."""
+    def cell(v):
+        v = str(v)
+        return ("background-color: rgba(46,125,50,.16)" if v.startswith("✓") else
+                "background-color: rgba(198,40,40,.16)" if v.startswith("✗") else "")
+    sty = df.style.map(cell)
+    if highlight in df.columns:
+        sty = sty.set_properties(subset=[highlight], **{"font-weight": "600", "border-left": "3px solid #CFAE70"})
+    return sty
+
+
+def preset_runs(run_keys):
+    return {name: run(tuple(sorted({**BASELINE, **PRESETS[name], **run_keys}.items())), _model_mtime) for name in PRESETS}
+
+
 # ---------- case questions (slides 5 and 10), for the run on screen vs the other volume ----------
 with tab_case:
     alt_cases = 4 if rp["cases"] != 4 else 8          # the case compares 88 vs 44 cases/day: 8 vs 4 cases per OR
@@ -361,6 +424,22 @@ with tab_case:
     st.caption(why + f"Pre-op beds free = Holding Room beds − Obs patients. Times marked ~ are averages; “busy until” and "
                f"“empty after” are on {LEVEL} of days. A 1-bed difference between runs can be random noise.")
 
+    st.divider()
+    st.markdown("##### Our recommendation")
+    st.markdown(
+        "1. **Stagger first-case starts in 3 waves**: 4 ORs at 7:30, 4 at 8:15, 3 at 9:00. This cuts the morning pre-op peak.\n"
+        "2. **Cap Obs patients at 10** in the Holding Room, leaving 13 beds for surgical patients.\n"
+        "3. **Add 6 PACU beds (12 → 18).** Staggering doesn't help PACU; only beds do.\n"
+        "4. **Bring patients in just in time**, and use the Holding Room for evening/overnight Obs once pre-op empties.")
+    pr = preset_runs({k: rp[k] for k in RUN_KEYS})
+    trio = {COL[BASE_NAME]: pr[BASE_NAME], COL[REC_NAME]: pr[REC_NAME], COL[ALT_NAME]: pr[ALT_NAME]}
+    gt = pd.DataFrame({"": [m for m, _ in glance_rows(r)], **{c: [v for _, v in glance_rows(x)] for c, x in trio.items()}})
+    st.dataframe(style_glance(gt, COL[REC_NAME]), width="stretch", hide_index=True, height=35 * (len(gt) + 1) + 3,
+                 column_config={"": st.column_config.TextColumn(width="medium")})
+    st.caption("Trade-off: the OR day runs about an hour later, so evening OR staffing is needed. Option B, letting pre-op and "
+               "PACU share beds (about 28 of the 35 needed at the busiest moment, no new beds), depends on cross-trained "
+               "staff and isn't modeled in this tool. Pick preset 5 in the sidebar to see the recommendation in detail.")
+
 # ---------- output table: every metric, this run next to each what-if ----------
 def metric_rows(x):
     """(section, metric, value) for one run, formatted for reading."""
@@ -395,31 +474,43 @@ def metric_rows(x):
 
 with tab_table:
     run_keys = {k: rp[k] for k in RUN_KEYS}           # same days, seed and service level for every column
-    cols = {}
+    runs = preset_runs(run_keys)
     this = st.session_state.result_label
     is_preset = this in PRESETS and {k: rp[k] for k in SCENARIO_KEYS} == scenario_of(this)
-    if not is_preset:                                  # a custom run gets its own first column
-        cols[f"▶ This run ({this})"] = r
-    for name in PRESETS:
-        res = run(tuple(sorted({**BASELINE, **PRESETS[name], **run_keys}.items())), _model_mtime)
-        cols[("▶ " if is_preset and name == this else "") + name] = res
+    cols = {} if is_preset else {"▶ This run": r}     # a custom run gets its own first column
+    for name, res in runs.items():
+        cols[("▶ " if is_preset and name == this else "") + COL[name]] = res
+    rec_col = next(c for c in cols if c.endswith(COL[REC_NAME]))
+
+    st.markdown(f"The scenarios in presentation order, plus the run on screen (▶). Every column uses the same "
+                f"{rp['reps']:,} simulated days, seed {rp['seed']} and planning standard (beds enough on {LEVEL} of days).")
+    if stale:
+        st.info("You changed the inputs. This table is still from the last run. Press **Run simulation** to update it.")
+
+    st.markdown("##### At a glance")
+    g_labels = [m for m, _ in glance_rows(r)]
+    g = pd.DataFrame({"": g_labels, **{c: [v for _, v in glance_rows(res)] for c, res in cols.items()}})
+    st.dataframe(style_glance(g, rec_col), width="stretch", hide_index=True, height=35 * (len(g) + 1) + 3,
+                 column_config={"": st.column_config.TextColumn(width="medium")})
+    st.caption("✓ beds needed fit in the beds available · ✗ they don't. New beds are counted against today's 23 Holding Room "
+               "and 12 PACU beds. Option B (sharing pre-op and PACU beds) isn't modeled here.")
+
     base = metric_rows(r)
     df = pd.DataFrame({"Area": [a for a, _, _ in base], "Metric": [m for _, m, _ in base]})
     for label, res in cols.items():
         df[label] = [str(v) for _, _, v in metric_rows(res)]
-    st.markdown(f"Every metric in one place: the run on screen (marked ▶) next to each what-if preset. All columns use "
-                f"the same {rp['reps']:,} simulated days, seed {rp['seed']} and service level ({LEVEL} of days).")
-    if stale:
-        st.info("You changed the inputs. This table is still from the last run. Press **Run simulation** to update it.")
-    st.dataframe(df, width="stretch", hide_index=True, height=35 * (len(df) + 1) + 3,
-                 column_config={"Area": st.column_config.TextColumn(width="small"),
-                                "Metric": st.column_config.TextColumn(width="medium")})
-    st.download_button("Download table (CSV)", df.to_csv(index=False).encode("utf-8-sig"),
+    with st.expander("Full detail: every metric"):
+        st.dataframe(df, width="stretch", hide_index=True, height=35 * (len(df) + 1) + 3,
+                     column_config={"Area": st.column_config.TextColumn(width="small"),
+                                    "Metric": st.column_config.TextColumn(width="medium")})
+        st.caption(f"Beds needed: enough beds on {LEVEL} of days, busiest moment included. Busiest moment: the most patients "
+                   "present at once that day. Days over capacity: share of days that moment exceeded the beds available. "
+                   "Average occupancy: average patients present ÷ beds, while the unit has patients. "
+                   "Times marked “by” hold on the service level's share of days.")
+    both = pd.concat([g.rename(columns={"": "Metric"}).assign(Area="At a glance"), df], ignore_index=True)
+    both = both[["Area", "Metric", *cols]]
+    st.download_button("Download both tables (CSV)", both.to_csv(index=False).encode("utf-8-sig"),
                        file_name="periop_output_table.csv", mime="text/csv")
-    st.caption(f"Beds needed: enough beds on {LEVEL} of days, busiest moment included. Busiest moment: the most patients "
-               "present at once that day. Days over capacity: share of days that moment exceeded the beds available. "
-               "Average occupancy: average patients present ÷ beds, while the unit has patients. "
-               "Times marked “by” hold on the service level's share of days.")
 
 # ---------- find the limit (goal-seek) ----------
 GOALS = {   # label: (input, values tried, "max" or "min", unit for the sentence)
@@ -547,7 +638,7 @@ An 11-OR onsite site is being converted to a low-acuity surgical center, and off
 
 #### How to use the simulator
 
-1. **Pick a starting point.** In the sidebar, *Start from a what-if* fills in a ready-made scenario: the case baseline (88 cases a day), 44 cases a day, staggered start waves, patients arriving early, or 18 PACU beds. Pick **Custom** to model your own environment; editing a preset and pressing Run also switches to Custom.
+1. **Pick a starting point.** In the sidebar, *Start from a what-if* fills in a ready-made scenario: numbered in presentation order: (1) the baseline, 88 cases a day; (2) 44 cases a day; (3) staggered start waves alone; (4) 18 PACU beds alone; (5) our recommendation, 3 waves + 18 PACU beds + Obs capped at 10; (6) the alternative of just adding 13 beds. Pick **Custom** to model your own environment; editing a preset and pressing Run also switches to Custom.
 2. **Change the inputs.** Every box in the sidebar can be edited. Nothing changes on screen until you press **Run simulation**, and a blue note reminds you when the results are out of date.
 3. **Read the Results tab.** Start with *What this means*, then the numbers and charts. The **Case questions** tab answers the four case questions for the same run, and the **Output table** tab puts every metric for this run and each what-if side by side (with a CSV download).
 4. **Find a limit.** The **Find the limit** tab answers "how far can we push it?" questions, like the most cases per OR your beds can handle.
