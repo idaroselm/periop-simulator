@@ -12,6 +12,7 @@ how many 23-hr Obs patients the Holding Room can still hold, and how long the OR
 ## What's in the app
 
 - **Case questions:** the four case questions (slides 5 and 10) answered for the run on screen, side by side with the same inputs at the other volume (88 vs 44 cases/day).
+- **Output table:** every metric (beds needed, shortfall, busiest moment, days over capacity, occupancy, Obs that fit, end-of-day times) for the run on screen next to each what-if preset, with a CSV download.
 - **Results:** beds needed at your service level (any level from 50% to 99.5%), a plain-language "What this means" summary, average bed occupancy, time-of-day charts and a bed sizing curve.
 - **Find the limit:** goal-seek the most cases per OR, the most ORs, or the fewest start waves that fit your beds (and, optionally, a latest OR finish time).
 - **View the Python behind these results:** the exact inputs of the run on screen as a runnable script that reproduces its answers, plus the model code.

@@ -168,7 +168,7 @@ if first_visit:
     st.info("New here? The **Guide** tab explains every input and result in plain language.")
 
 # Keyed so the open tab survives reruns (e.g. pressing "Find it" keeps you on Find the limit)
-tab_res, tab_case, tab_goal, tab_guide = st.tabs(["Results", "Case questions", "Find the limit", "Guide"],
+tab_res, tab_case, tab_table, tab_goal, tab_guide = st.tabs(["Results", "Case questions", "Output table", "Find the limit", "Guide"],
                                                   key="tab", on_change="rerun")
 
 with tab_res:
@@ -361,6 +361,66 @@ with tab_case:
     st.caption(why + f"Pre-op beds free = Holding Room beds − Obs patients. Times marked ~ are averages; “busy until” and "
                f"“empty after” are on {LEVEL} of days. A 1-bed difference between runs can be random noise.")
 
+# ---------- output table: every metric, this run next to each what-if ----------
+def metric_rows(x):
+    """(section, metric, value) for one run, formatted for reading."""
+    p = x["params"]
+    occ = lambda c, b: show(sim_core.occupancy(c, b))
+    return [
+        ("Scenario", "Cases per day", f"{p['n_or'] * p['cases']} ({p['n_or']} ORs × {p['cases']})"),
+        ("Scenario", "Start waves", f"{p['waves']}" + (f" ({p['wave_gap']} min apart)" if p["waves"] > 1 else "")),
+        ("Scenario", "Early-arrival cushion (min)", f"{p['buf_min']}–{p['buf_max']}"),
+        ("Pre-op", "Beds free for surgical patients", f"{x['avail']} ({p['hold_beds']} − {p['obs']} Obs)"),
+        ("Pre-op", "Beds needed", x["need_hold"]),
+        ("Pre-op", "Short by", max(0, x["need_hold"] - x["avail"])),
+        ("Pre-op", "Busiest moment, average day", f"{x['mean_hold']:.1f}"),
+        ("Pre-op", "Busiest moment, worst day", x["max_hold"]),
+        ("Pre-op", "Days over capacity", f"{x['over_hold']:.0%}"),
+        ("Pre-op", "Average occupancy of free beds", occ(x["avg_census_hold"], x["avail"])),
+        ("Pre-op", "Obs patients that fit all day", f"{x['obs_fit']} (today {p['obs']})"),
+        ("Pre-op", "Empty after", clock(x["hold_empty_after"])),
+        ("OR", "Last case out, average day", clock(x["last_or_mean"])),
+        ("OR", "Last case out, by (service level)", clock(x["last_or_p95"])),
+        ("PACU", "Beds", p["pacu_beds"]),
+        ("PACU", "Beds needed", x["need_pacu"]),
+        ("PACU", "Short by", max(0, x["need_pacu"] - p["pacu_beds"])),
+        ("PACU", "Busiest moment, average day", f"{x['mean_pacu']:.1f}"),
+        ("PACU", "Busiest moment, worst day", x["max_pacu"]),
+        ("PACU", "Days over capacity", f"{x['over_pacu']:.0%}"),
+        ("PACU", "Average occupancy, current beds", occ(x["avg_census_pacu"], p["pacu_beds"])),
+        ("PACU", "Average occupancy, beds needed", occ(x["avg_census_pacu"], x["need_pacu"])),
+        ("PACU", "Last patient out, by (service level)", clock(x["last_pacu_p95"])),
+    ]
+
+
+with tab_table:
+    run_keys = {k: rp[k] for k in RUN_KEYS}           # same days, seed and service level for every column
+    cols = {}
+    this = st.session_state.result_label
+    is_preset = this in PRESETS and {k: rp[k] for k in SCENARIO_KEYS} == scenario_of(this)
+    if not is_preset:                                  # a custom run gets its own first column
+        cols[f"▶ This run ({this})"] = r
+    for name in PRESETS:
+        res = run(tuple(sorted({**BASELINE, **PRESETS[name], **run_keys}.items())), _model_mtime)
+        cols[("▶ " if is_preset and name == this else "") + name] = res
+    base = metric_rows(r)
+    df = pd.DataFrame({"Area": [a for a, _, _ in base], "Metric": [m for _, m, _ in base]})
+    for label, res in cols.items():
+        df[label] = [str(v) for _, _, v in metric_rows(res)]
+    st.markdown(f"Every metric in one place: the run on screen (marked ▶) next to each what-if preset. All columns use "
+                f"the same {rp['reps']:,} simulated days, seed {rp['seed']} and service level ({LEVEL} of days).")
+    if stale:
+        st.info("You changed the inputs. This table is still from the last run. Press **Run simulation** to update it.")
+    st.dataframe(df, width="stretch", hide_index=True, height=35 * (len(df) + 1) + 3,
+                 column_config={"Area": st.column_config.TextColumn(width="small"),
+                                "Metric": st.column_config.TextColumn(width="medium")})
+    st.download_button("Download table (CSV)", df.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="periop_output_table.csv", mime="text/csv")
+    st.caption(f"Beds needed: enough beds on {LEVEL} of days, busiest moment included. Busiest moment: the most patients "
+               "present at once that day. Days over capacity: share of days that moment exceeded the beds available. "
+               "Average occupancy: average patients present ÷ beds, while the unit has patients. "
+               "Times marked “by” hold on the service level's share of days.")
+
 # ---------- find the limit (goal-seek) ----------
 GOALS = {   # label: (input, values tried, "max" or "min", unit for the sentence)
     "Most cases per OR": ("cases", range(1, 21), "max", "cases per OR"),
@@ -489,7 +549,7 @@ An 11-OR onsite site is being converted to a low-acuity surgical center, and off
 
 1. **Pick a starting point.** In the sidebar, *Start from a what-if* fills in a ready-made scenario: the case baseline (88 cases a day), 44 cases a day, staggered start waves, patients arriving early, or 18 PACU beds. Pick **Custom** to model your own environment; editing a preset and pressing Run also switches to Custom.
 2. **Change the inputs.** Every box in the sidebar can be edited. Nothing changes on screen until you press **Run simulation**, and a blue note reminds you when the results are out of date.
-3. **Read the Results tab.** Start with *What this means*, then the numbers and charts. The **Case questions** tab answers the four case questions for the same run.
+3. **Read the Results tab.** Start with *What this means*, then the numbers and charts. The **Case questions** tab answers the four case questions for the same run, and the **Output table** tab puts every metric for this run and each what-if side by side (with a CSV download).
 4. **Find a limit.** The **Find the limit** tab answers "how far can we push it?" questions, like the most cases per OR your beds can handle.
 5. **Compare.** Press *Pin last run* after each scenario to line them up in one table. Keep the same random seed so differences come from your change, not from luck.
 
