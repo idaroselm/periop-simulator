@@ -432,7 +432,8 @@ with tab_case:
         "3. **Add 6 PACU beds (12 → 18).** Staggering doesn't help PACU; only beds do.\n"
         "4. **Bring patients in just in time**, and use the Holding Room for evening/overnight Obs once pre-op empties.")
     pr = preset_runs({k: rp[k] for k in RUN_KEYS})
-    trio = {COL[BASE_NAME]: pr[BASE_NAME], COL[REC_NAME]: pr[REC_NAME], COL[ALT_NAME]: pr[ALT_NAME]}
+    low = list(PRESETS)[1]                           # 44 cases/day
+    trio = {COL[BASE_NAME]: pr[BASE_NAME], COL[low]: pr[low], COL[REC_NAME]: pr[REC_NAME], COL[ALT_NAME]: pr[ALT_NAME]}
     gt = pd.DataFrame({"": [m for m, _ in glance_rows(r)], **{c: [v for _, v in glance_rows(x)] for c, x in trio.items()}})
     st.dataframe(style_glance(gt, COL[REC_NAME]), width="stretch", hide_index=True, height=35 * (len(gt) + 1) + 3,
                  column_config={"": st.column_config.TextColumn(width="medium")})
