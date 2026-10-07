@@ -69,6 +69,19 @@ def avg_census(ins, outs):
     return sum(o - i for i, o in zip(ins, outs)) / window if window > 0 else 0.0
 
 
+def case_counts(p):
+    """Cases each OR does. A fractional average (e.g. 2.5 per OR, today's level) is spread as evenly as possible:
+    11 ORs x 2.5 = 27.5 -> 28 cases -> 6 ORs do 3 and 5 ORs do 2. Whole numbers give every OR the same count."""
+    n = p["n_or"]
+    total = int(p["cases"] * n + 0.5)
+    base, extra = divmod(total, n)
+    return [base + (1 if o < extra else 0) for o in range(n)]
+
+
+def total_cases(p):
+    return sum(case_counts(p))
+
+
 def wave_starts(p):
     """Split the ORs into waves as evenly as possible (11 ORs: 1 wave 11 / 2 waves 6+5 / 3 waves 4+4+3)."""
     n = p["n_or"]
@@ -80,6 +93,7 @@ def simulate_py(p):
     t_start = time.perf_counter()
     rng = random.Random(p["seed"])
     starts = wave_starts(p)
+    counts = case_counts(p)
     peaks_h, peaks_p, last_or, last_pacu, cen_h, cen_p = [], [], [], [], [], []
     grid_h, grid_p = [], []
     for _ in range(p["reps"]):
@@ -87,7 +101,7 @@ def simulate_py(p):
         gh, gp = [0] * NB, [0] * NB
         for o in range(p["n_or"]):
             prev_out = None
-            for c in range(p["cases"]):
+            for c in range(counts[o]):
                 pre = draw(rng, p["pre_m"], p["pre_s"])
                 ort = draw(rng, p["or_m"], p["or_s"])
                 pac = draw(rng, p["pacu_m"], p["pacu_s"])
@@ -156,7 +170,9 @@ def simulate_np(p):
     import numpy as np
     t_start = time.perf_counter()
     rng = np.random.default_rng(p["seed"])
-    R, n, C = p["reps"], p["n_or"], p["cases"]
+    R, n = p["reps"], p["n_or"]
+    counts = np.array(case_counts(p))
+    C = int(counts.max())
     shape = (R, n, C)
     pre = np.abs(np.floor(rng.normal(p["pre_m"], p["pre_s"], shape)))
     ort = np.abs(np.floor(rng.normal(p["or_m"], p["or_s"], shape)))
@@ -170,6 +186,12 @@ def simulate_np(p):
     or_out = or_in + ort
     h_in, h_out = (or_in - pre - cush).reshape(R, -1), or_in.reshape(R, -1)
     p_in, p_out = or_out.reshape(R, -1), (or_out + pac).reshape(R, -1)
+    # ORs with fewer cases (fractional average): park their unused case slots far in the future with zero length,
+    # so they never count toward a peak, a grid interval, an end time or a census.
+    active = np.broadcast_to((np.arange(C)[None, :] < counts[:, None])[None], (R, n, C)).reshape(R, -1)
+    if not active.all():
+        FAR = 1e12
+        h_in, h_out, p_in, p_out = (np.where(active, x, FAR) for x in (h_in, h_out, p_in, p_out))
 
     def peaks(a, b):   # sweep the day's events in time order (departures before arrivals at a tie); max running census
         t = np.concatenate([a, b], axis=1)
@@ -190,7 +212,7 @@ def simulate_np(p):
         return np.cumsum(marks, axis=1)[:, :NB]
 
     def census(a, b):   # per day: patient-minutes / (last departure - first arrival)
-        window = b.max(axis=1) - a.min(axis=1)
+        window = np.where(active, b, -np.inf).max(axis=1) - np.where(active, a, np.inf).min(axis=1)
         return np.where(window > 0, (b - a).sum(axis=1) / np.where(window > 0, window, 1), 0.0)
 
     pk_h, pk_p = peaks(h_in, h_out), peaks(p_in, p_out)
@@ -199,7 +221,7 @@ def simulate_np(p):
     p95_h = np.percentile(g_h, 100 * sl, axis=0)       # busy day at the service level; linear = Excel PERCENTILE
     p95_p = np.percentile(g_p, 100 * sl, axis=0)
     p50_h, p50_p = np.percentile(g_h, 50, axis=0), np.percentile(g_p, 50, axis=0)   # typical day
-    last_or, last_pacu = p_in.max(axis=1), p_out.max(axis=1)
+    last_or, last_pacu = np.where(active, p_in, -np.inf).max(axis=1), np.where(active, p_out, -np.inf).max(axis=1)
     avail = max(0, p["hold_beds"] - p["obs"])
     need_h = ceil_beds(np.percentile(pk_h, 100 * sl))
     need_p = ceil_beds(np.percentile(pk_p, 100 * sl))

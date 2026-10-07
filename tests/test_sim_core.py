@@ -278,3 +278,31 @@ def test_find_limit_max_and_min():
     assert sim_core.find_limit(big, "waves", range(1, 4), goal="min")[0] == 1
     # impossible target -> None
     assert sim_core.find_limit({**p, "pacu_beds": 0}, "cases", range(1, 4))[0] is None
+
+
+# ---------- fractional cases per OR (today's 2.5 cases per OR) ----------
+def test_case_counts_spread_evenly():
+    assert sim_core.case_counts({"n_or": 11, "cases": 2.5}) == [3] * 6 + [2] * 5      # 27.5 -> 28 cases
+    assert sim_core.total_cases({"n_or": 11, "cases": 8}) == 88
+    assert sim_core.case_counts({"n_or": 4, "cases": 1.25}) == [2, 1, 1, 1]
+
+
+@pytest.mark.parametrize("engine", ["numpy", "python"])
+def test_fractional_cases_hand_calculation(engine):
+    """2 ORs, 1.5 cases each = 3 cases: OR 1 does 2, OR 2 does 1. No variation:
+    OR 1: 7:30-8:30, 9:00-10:00; OR 2: 7:30-8:30. Pre-op peak 2 (6:30-7:30), PACU: 8:30-10:00 x2 and 10:00-11:30
+    -> peak 2; last case out of the OR 10:00; last PACU out 11:30."""
+    r = sim_core.simulate(dict(n_or=2, cases=1.5, pre_s=0, or_s=0, pacu_s=0, reps=5), engine=engine)
+    assert (r["need_hold"], r["need_pacu"]) == (2, 2)
+    assert r["last_or_mean"] == 600 and r["last_pacu_p95"] == 690
+    # census: pre-op 180 patient-min over 6:30-9:00 (150 min) = 1.2; PACU 270 over 8:30-11:30 (180 min) = 1.5
+    assert r["avg_census_hold"] == pytest.approx(1.2) and r["avg_census_pacu"] == pytest.approx(1.5)
+
+
+def test_fractional_cases_engines_agree_and_sit_between_whole_numbers():
+    a = sim_core.simulate(dict(cases=2.5, reps=3000, seed=1), engine="numpy")
+    b = sim_core.simulate(dict(cases=2.5, reps=3000, seed=2), engine="python")
+    assert abs(a["mean_pacu"] - b["mean_pacu"]) < 0.15 and abs(a["mean_hold"] - b["mean_hold"]) < 0.15
+    lo, hi = (sim_core.simulate(dict(cases=c, reps=3000, seed=1)) for c in (2, 3))
+    assert lo["last_or_mean"] < a["last_or_mean"] < hi["last_or_mean"]
+    assert lo["mean_pacu"] <= a["mean_pacu"] + 0.05 and a["mean_pacu"] <= hi["mean_pacu"] + 0.05

@@ -11,6 +11,7 @@ how many 23-hr Obs patients the Holding Room can still hold, and how long the OR
 
 ## What's in the app
 
+- **Presets, in presentation order:** 1 Today (2.5 cases/OR) · 2 Proposed 88/day (the app opens here) · 3 44/day · 4 stagger starts · 5 18 PACU beds · 6 ★ Recommended · 7 add 13 beds.
 - **Case questions:** the four case questions (slides 5 and 10) answered for the run on screen, side by side with the same inputs at the other volume (88 vs 44 cases/day).
 - **Output table:** every metric (beds needed, shortfall, busiest moment, days over capacity, occupancy, Obs that fit, end-of-day times) for the run on screen next to each what-if preset, with a CSV download.
 - **Results:** beds needed at your service level (any level from 50% to 99.5%), a plain-language "What this means" summary, average bed occupancy, time-of-day charts and a bed sizing curve.
@@ -36,10 +37,11 @@ streamlit run app.py
 
 ## Model assumptions
 
-The case baseline is below. Pick **Custom** in the what-if list to model any environment:
+The case setup is below (the app opens on the proposed 88 cases/day). Pick **Custom** in the what-if list to model any environment:
 up to 40 ORs, 20 cases per OR, 6 start waves and 200 beds. Long days are tracked 48 hours from 4:00 AM.
 
-- All 11 ORs start at 7:30 AM; 8 cases per OR (88/day) or 4 (44/day); 30-minute turnover.
+- Today: about 2.5 cases per OR (~28/day, slide 4). Proposed: 8 cases per OR (88/day), or 4 (44/day). Half steps are spread across ORs (2.5 = 6 ORs doing 3 cases, 5 doing 2).
+- All 11 ORs start at 7:30 AM; 30-minute turnover.
 - Pre-op ~ Normal(60, 30), OR ~ Normal(60, 20), PACU ~ Normal(90, 40) minutes.
 - 23 Holding Room beds (14 used by Obs patients), 12 PACU beds.
 - Patients are pulled into pre-op so it ends when their OR is ready (the OR is the bottleneck); an optional early-arrival cushion can be added.

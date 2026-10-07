@@ -23,17 +23,19 @@ st.session_state.seen = True
 
 CUSTOM = "Custom · edit any input"
 PRESETS = {
-    "1 · Baseline: 88 cases/day": {},
-    "2 · Lower volume: 44 cases/day": {"cases": 4},
-    "3 · Lever: stagger starts (3 waves)": {"waves": 3, "wave_gap": 45},
-    "4 · Lever: 18 PACU beds": {"pacu_beds": 18},
-    "5 · ★ Recommended: 3 waves + 18 PACU + 10 Obs": {"waves": 3, "wave_gap": 45, "pacu_beds": 18, "obs": 10},
-    "6 · Alternative: add 13 beds": {"hold_beds": 30, "pacu_beds": 18},
+    "1 · Today: 2.5 cases per OR": {"cases": 2.5},
+    "2 · Proposed: 88 cases/day": {},
+    "3 · Lower volume: 44 cases/day": {"cases": 4},
+    "4 · Lever: stagger starts (3 waves)": {"waves": 3, "wave_gap": 45},
+    "5 · Lever: 18 PACU beds": {"pacu_beds": 18},
+    "6 · ★ Recommended: 3 waves + 18 PACU + 10 Obs": {"waves": 3, "wave_gap": 45, "pacu_beds": 18, "obs": 10},
+    "7 · Alternative: add 13 beds": {"hold_beds": 30, "pacu_beds": 18},
 }
-BASE_NAME, REC_NAME, ALT_NAME = list(PRESETS)[0], list(PRESETS)[4], list(PRESETS)[5]
+_P = list(PRESETS)
+TODAY_NAME, BASE_NAME, LOW_NAME, REC_NAME, ALT_NAME = _P[0], _P[1], _P[2], _P[5], _P[6]
 COL = {   # column headers for the tables
-    BASE_NAME: "1 · Baseline", list(PRESETS)[1]: "2 · 44/day", list(PRESETS)[2]: "3 · 3 waves",
-    list(PRESETS)[3]: "4 · 18 PACU", REC_NAME: "5 ★ Recommended", ALT_NAME: "6 · Add 13 beds",
+    _P[0]: "1 · Today", _P[1]: "2 · Proposed 88", _P[2]: "3 · 44/day", _P[3]: "4 · 3 waves",
+    _P[4]: "5 · 18 PACU", _P[5]: "6 ★ Recommended", _P[6]: "7 · Add 13 beds",
 }
 
 
@@ -54,7 +56,7 @@ def pct(x, digits=1):
 # ---------- inputs ----------
 # Every input lives in st.session_state under "in_<name>". Picking a preset fills in its scenario;
 # picking Custom leaves the inputs exactly as they are, so any combination can be built and run.
-BASELINE = dict(sim_core.DEFAULTS)          # the case baseline, 1,000 simulated days
+BASELINE = dict(sim_core.DEFAULTS)          # the proposed plan (88 cases/day), 1,000 simulated days; presets build on it
 SCENARIO_KEYS = ["cases", "n_or", "first", "waves", "wave_gap", "turnover", "pre_m", "pre_s", "or_m", "or_s",
                  "pacu_m", "pacu_s", "hold_beds", "obs", "pacu_beds", "buf_min", "buf_max"]
 RUN_KEYS = ["reps", "seed", "service_level"]          # presets never change these
@@ -63,6 +65,8 @@ RUN_KEYS = ["reps", "seed", "service_level"]          # presets never change the
 def to_widget(k, v):
     if k == "first":
         return dtime(int(v) // 60, int(v) % 60)
+    if k == "cases":
+        return float(v)                                           # half steps allowed (today: 2.5 per OR)
     return round(v * 100, 1) if k == "service_level" else v      # the slider shows percent
 
 
@@ -82,7 +86,9 @@ def read_inputs():
     first = g("first")
     p = {k: g(k) for k in SCENARIO_KEYS + RUN_KEYS if k != "first"}
     p["first"] = first.hour * 60 + first.minute
-    p = {k: (round(float(v) / 100, 4) if k == "service_level" else int(v)) for k, v in p.items()}
+    p = {k: (round(float(v) / 100, 4) if k == "service_level" else float(v) if k == "cases" else int(v)) for k, v in p.items()}
+    if float(p["cases"]).is_integer():
+        p["cases"] = int(p["cases"])
     p["buf_max"] = max(p["buf_min"], p["buf_max"])
     return p
 
@@ -97,9 +103,10 @@ def on_run():
     st.session_state.run_now = True
 
 
-if "in_cases" not in st.session_state:                     # first visit: load the case baseline
+if "in_cases" not in st.session_state:                     # first visit: load the proposed 88-case plan
     for k in SCENARIO_KEYS + RUN_KEYS:
         st.session_state[f"in_{k}"] = to_widget(k, BASELINE[k])
+    st.session_state.preset = BASE_NAME
 
 st.sidebar.title("Inputs")
 preset = st.sidebar.selectbox("Start from a what-if", [*PRESETS, CUSTOM], key="preset", on_change=apply_preset,
@@ -112,8 +119,9 @@ with st.sidebar.form("inputs"):
                    "100 days, and you accept running short on the other 5. Higher = safer but more beds. "
                    "Above 99%, use 1,000+ simulated days so the answer isn't resting on one or two days.")
     with st.expander("Schedule", expanded=True):
-        st.number_input("Cases per OR per day", 1, 20, key="in_cases",
-                        help="Up to 20. Long days run past midnight; the model tracks 48 hours from 4:00 AM.")
+        st.number_input("Cases per OR per day", 0.5, 20.0, step=0.5, format="%.1f", key="in_cases",
+                        help="Today: about 2.5. Proposed: 8 (88/day). Half steps split the ORs, e.g. 2.5 = 6 ORs doing 3 cases "
+                             "and 5 doing 2. Up to 20; long days run past midnight (the model tracks 48 hours from 4:00 AM).")
         st.number_input("Number of ORs", 1, 40, key="in_n_or")
         st.time_input("First case in", key="in_first", step=900,
                       help="The case: all ORs start at 7:30 AM. The charts start at 4:00 AM, so keep the first case after about 6:00 AM.")
@@ -148,7 +156,7 @@ def run(p_items, model_version):
     return sim_core.simulate(dict(p_items))
 
 
-# Results only change when "Run simulation" is pressed; the first visit shows the case baseline.
+# Results only change when "Run simulation" is pressed; the first visit shows the proposed 88-case plan.
 if "result" not in st.session_state:
     st.session_state.result, st.session_state.result_label = run(tuple(sorted(BASELINE.items())), _model_mtime), BASE_NAME
 if st.session_state.pop("run_now", False):
@@ -304,10 +312,10 @@ with tab_res:
 
 # ---------- at-a-glance summary (Output table and Case questions) ----------
 def changes(p):
-    """What a scenario changes vs the case baseline, in a few words."""
+    """What a scenario changes vs the proposed 88-case plan, in a few words."""
     b, out = BASELINE, []
     if p["cases"] != b["cases"] or p["n_or"] != b["n_or"]:
-        out.append(f"{p['n_or'] * p['cases']} cases/day")
+        out.append(f"{sim_core.total_cases(p)} cases/day" + (" (today)" if p["cases"] == 2.5 else ""))
     if p["waves"] > 1:
         out.append(f"{p['waves']} waves")
     if p["obs"] != b["obs"]:
@@ -322,7 +330,7 @@ def changes(p):
                                                      "buf_min", "buf_max") and p[k] != b[k]]
     if other:
         out.append("other inputs changed")
-    return " · ".join(out) or "Today's plan"
+    return " · ".join(out) or "Proposed plan"
 
 
 def glance_rows(x):
@@ -332,7 +340,7 @@ def glance_rows(x):
     ok = x["need_hold"] <= x["avail"] and x["need_pacu"] <= p["pacu_beds"]
     return [
         ("What changes", changes(p)),
-        ("Cases per day", f"{p['n_or'] * p['cases']}"),
+        ("Cases per day", f"{sim_core.total_cases(p)}"),
         ("New beds built", f"{new_beds:+d}" if new_beds else "0"),
         ("Pre-op beds", fits(x["need_hold"], x["avail"])),
         ("PACU beds", fits(x["need_pacu"], p["pacu_beds"])),
@@ -361,9 +369,9 @@ def preset_runs(run_keys):
 
 # ---------- case questions (slides 5 and 10), for the run on screen vs the other volume ----------
 with tab_case:
-    alt_cases = 4 if rp["cases"] != 4 else 8          # the case compares 88 vs 44 cases/day: 8 vs 4 cases per OR
+    alt_cases = 4 if rp["cases"] == 8 else 8          # the case compares 88 vs 44 cases/day; other volumes compare with 88
     ra = run(tuple(sorted({**rp, "cases": alt_cases}.items())), _model_mtime)
-    vol, vol_alt = rp["n_or"] * rp["cases"], rp["n_or"] * alt_cases
+    vol, vol_alt = sim_core.total_cases(rp), sim_core.total_cases({**rp, "cases": alt_cases})
 
     def shortfalls(x):
         out = []
@@ -432,8 +440,8 @@ with tab_case:
         "3. **Add 6 PACU beds (12 → 18).** Staggering doesn't help PACU; only beds do.\n"
         "4. **Bring patients in just in time**, and use the Holding Room for evening/overnight Obs once pre-op empties.")
     pr = preset_runs({k: rp[k] for k in RUN_KEYS})
-    low = list(PRESETS)[1]                           # 44 cases/day
-    trio = {COL[BASE_NAME]: pr[BASE_NAME], COL[low]: pr[low], COL[REC_NAME]: pr[REC_NAME], COL[ALT_NAME]: pr[ALT_NAME]}
+    trio = {c: pr[n] for c, n in ((COL[TODAY_NAME], TODAY_NAME), (COL[BASE_NAME], BASE_NAME), (COL[LOW_NAME], LOW_NAME),
+                                    (COL[REC_NAME], REC_NAME), (COL[ALT_NAME], ALT_NAME))}
     gt = pd.DataFrame({"": [m for m, _ in glance_rows(r)], **{c: [v for _, v in glance_rows(x)] for c, x in trio.items()}})
     st.dataframe(style_glance(gt, COL[REC_NAME]), width="stretch", hide_index=True, height=35 * (len(gt) + 1) + 3,
                  column_config={"": st.column_config.TextColumn(width="medium")})
@@ -447,7 +455,7 @@ def metric_rows(x):
     p = x["params"]
     occ = lambda c, b: show(sim_core.occupancy(c, b))
     return [
-        ("Scenario", "Cases per day", f"{p['n_or'] * p['cases']} ({p['n_or']} ORs × {p['cases']})"),
+        ("Scenario", "Cases per day", f"{sim_core.total_cases(p)} ({p['n_or']} ORs × {p['cases']:g})"),
         ("Scenario", "Start waves", f"{p['waves']}" + (f" ({p['wave_gap']} min apart)" if p["waves"] > 1 else "")),
         ("Scenario", "Early-arrival cushion (min)", f"{p['buf_min']}–{p['buf_max']}"),
         ("Pre-op", "Beds free for surgical patients", f"{x['avail']} ({p['hold_beds']} − {p['obs']} Obs)"),
@@ -494,7 +502,9 @@ with tab_table:
     st.dataframe(style_glance(g, rec_col), width="stretch", hide_index=True, height=35 * (len(g) + 1) + 3,
                  column_config={"": st.column_config.TextColumn(width="medium")})
     st.caption("✓ beds needed fit in the beds available · ✗ they don't. New beds are counted against today's 23 Holding Room "
-               "and 12 PACU beds. Option B (sharing pre-op and PACU beds) isn't modeled here.")
+               "and 12 PACU beds. Option B (sharing pre-op and PACU beds) isn't modeled here. Today (1) also shows ✗ because the "
+               "model assumes every OR starts at 7:30 and Obs patients hold beds all day; in practice today's evening Obs patients "
+               "arrive after pre-op empties around noon (see the Guide).")
 
     base = metric_rows(r)
     df = pd.DataFrame({"Area": [a for a, _, _ in base], "Metric": [m for _, m, _ in base]})
@@ -526,7 +536,7 @@ MUST = {"Pre-op and PACU beds": ("hold", "pacu"), "Pre-op beds only": ("hold",),
 
 def use_best():
     key, best = st.session_state.goal["key"], st.session_state.goal["best"]
-    st.session_state[f"in_{key}"] = best
+    st.session_state[f"in_{key}"] = float(best) if key == "cases" else best
     st.session_state.preset = CUSTOM
 
 
@@ -560,7 +570,7 @@ with tab_goal:
             best, runs = limit(tuple(sorted(params.items())), spec["label"], spec["must"], spec["end_by"], _model_mtime)
         st.session_state.goal = dict(key=key, best=best, runs=runs, direction=direction, unit=unit, label=spec["label"],
                                      must=spec["must"], end_by=spec["end_by"], params=params)
-        st.caption(f"Using the sidebar inputs in effect: {params['n_or']} ORs × {params['cases']} cases, "
+        st.caption(f"Using the sidebar inputs in effect: {params['n_or']} ORs × {params['cases']:g} cases, "
                    f"{params['waves']} start wave{'s' if params['waves'] != 1 else ''}, "
                    f"{max(0, params['hold_beds'] - params['obs'])} free pre-op beds ({params['hold_beds']} − {params['obs']} Obs), "
                    f"{params['pacu_beds']} PACU beds, enough on {pct(params['service_level'])} of days, {params['reps']:,} simulated days "
@@ -637,9 +647,11 @@ An 11-OR onsite site is being converted to a low-acuity surgical center, and off
 | 3. Is the expected increase in OR case volume going to overwhelm our capacity? | *Days PACU runs over*, the time-of-day charts, and *Last case out of the OR*. |
 | 4. Will the answers change at 44 instead of 88 cases a day? | The **Case questions** tab answers all four for your run and reruns it at the other volume. You can also pin both presets and compare. |
 
+**About preset 1 (today).** At about 2.5 cases per OR, the model still shows pre-op and PACU short at the busiest moment, because it assumes every OR starts at 7:30 and the 14 Obs patients hold their beds all day. In practice today's Obs patients are evening/overnight: the last case is out by about 12:15 PM and pre-op is empty by about 11:45 AM, long before they arrive. At 88 cases a day, pre-op stays busy until about 8:15 PM, right when evening Obs patients need those beds. That timing clash is the real problem the proposed volume creates.
+
 #### How to use the simulator
 
-1. **Pick a starting point.** In the sidebar, *Start from a what-if* fills in a ready-made scenario: numbered in presentation order: (1) the baseline, 88 cases a day; (2) 44 cases a day; (3) staggered start waves alone; (4) 18 PACU beds alone; (5) our recommendation, 3 waves + 18 PACU beds + Obs capped at 10; (6) the alternative of just adding 13 beds. Pick **Custom** to model your own environment; editing a preset and pressing Run also switches to Custom.
+1. **Pick a starting point.** In the sidebar, *Start from a what-if* fills in a ready-made scenario: numbered in presentation order: (1) today, about 2.5 cases per OR; (2) the proposed 88 cases a day, which the app opens on; (3) 44 cases a day; (4) staggered start waves alone; (5) 18 PACU beds alone; (6) our recommendation, 3 waves + 18 PACU beds + Obs capped at 10; (7) the alternative of just adding 13 beds. Pick **Custom** to model your own environment; editing a preset and pressing Run also switches to Custom.
 2. **Change the inputs.** Every box in the sidebar can be edited. Nothing changes on screen until you press **Run simulation**, and a blue note reminds you when the results are out of date.
 3. **Read the Results tab.** Start with *What this means*, then the numbers and charts. The **Case questions** tab answers the four case questions for the same run, and the **Output table** tab puts every metric for this run and each what-if side by side (with a CSV download).
 4. **Find a limit.** The **Find the limit** tab answers "how far can we push it?" questions, like the most cases per OR your beds can handle.
@@ -678,7 +690,7 @@ In **Find the limit**, the *Fits* column marks each setting that meets your targ
 
 #### Service level vs occupancy
 
-They answer different questions. **Service level** asks "is there a bed at the busiest moment, on most days?" **Occupancy** asks "how full are the beds on average?" Because demand swings from day to day, beds sized to cover busy days sit partly empty on an average day. In the case baseline, 18 PACU beds cover 95% of days at about 51% average occupancy. Today's 12 beds are about 77% full on average, which looks comfortable, yet PACU runs short on 999 of 1,000 simulated days, because the patients arrive in bunches. That's why the tool sizes beds on the peak and shows occupancy alongside it.
+They answer different questions. **Service level** asks "is there a bed at the busiest moment, on most days?" **Occupancy** asks "how full are the beds on average?" Because demand swings from day to day, beds sized to cover busy days sit partly empty on an average day. In the proposed 88-case plan, 18 PACU beds cover 95% of days at about 51% average occupancy. Today's 12 beds are about 77% full on average, which looks comfortable, yet PACU runs short on 999 of 1,000 simulated days, because the patients arrive in bunches. That's why the tool sizes beds on the peak and shows occupancy alongside it.
 
 #### What the model assumes
 
@@ -708,7 +720,7 @@ def run_script(p, res):
     rows = []
     for k in sim_core.DEFAULTS:
         v = p[k]
-        note = NOTES[k] + (f" (case baseline: {sim_core.DEFAULTS[k]})" if v != sim_core.DEFAULTS[k] else "")
+        note = NOTES[k] + (f" (proposed plan: {sim_core.DEFAULTS[k]})" if v != sim_core.DEFAULTS[k] else "")
         if k == "first":
             note += f" = {clock(v)}"
         rows.append(f"    {k!r}: {v!r},".ljust(32) + f"# {note}")
@@ -730,11 +742,11 @@ with st.expander("View the Python behind these results"):
     script = run_script(rp, r)
     st.markdown("**The exact run shown above.** These are the inputs the results on screen were run with "
                 f"({st.session_state.result_label}, {rp['reps']:,} days, seed {rp['seed']}). "
-                "Running it with `sim_core.py` gives the same answers. Inputs that differ from the case baseline are marked.")
+                "Running it with `sim_core.py` gives the same answers. Inputs that differ from the proposed 88-case plan are marked.")
     if stale:
         st.caption("You've changed inputs since that run. Press Run simulation to update the results and this code.")
     st.code(script, language="python")
     st.download_button("Download run_scenario.py", script, file_name="run_scenario.py", mime="text/x-python")
-    st.markdown("**The model (sim_core.py).** The same file the app runs. Its `DEFAULTS` are the case baseline.")
+    st.markdown("**The model (sim_core.py).** The same file the app runs. Its `DEFAULTS` are the proposed 88-case plan.")
     st.code(open(sim_core.__file__).read(), language="python")
 st.caption("Limits: PACU blocking isn't modeled (when PACU is full, real patients wait in the OR). Staffing and transport time are excluded, per the case.")
